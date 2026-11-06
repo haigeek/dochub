@@ -1,0 +1,9 @@
+.DS_Store
+.env
+data/
+server/dochub
+server/config.env
+server/__debug_bin*
+web/node_modules/
+web/dist/
+*.log
