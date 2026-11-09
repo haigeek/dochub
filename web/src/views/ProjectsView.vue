@@ -17,20 +17,24 @@ import {
   GridOutline,
   ListOutline,
   SearchOutline,
+  SettingsOutline,
   TimeOutline,
 } from '@vicons/ionicons5'
 import AppHeader from '@/components/AppHeader.vue'
 import ProjectFormModal from '@/components/ProjectFormModal.vue'
-import UsersModal from '@/components/UsersModal.vue'
+import ProjectManageModal from '@/components/ProjectManageModal.vue'
 import { api } from '@/api'
+import { useSession } from '@/session'
 import type { Project } from '@/types'
 
 const router = useRouter()
 const message = useMessage()
+const session = useSession()
 const projects = ref<Project[]>([])
 const loading = ref(true)
 const showCreate = ref(false)
-const showUsers = ref(false)
+const showManage = ref(false)
+const managingProject = ref<Project | null>(null)
 const viewMode = ref<'list' | 'grid'>('list')
 const searchQuery = ref('')
 
@@ -69,6 +73,29 @@ function projectSaved(project: Project) {
   void router.push({ name: 'project', params: { slug: project.slug } })
 }
 
+function openProject(project: Project) {
+  void router.push({ name: 'project', params: { slug: project.slug } })
+}
+
+function openProjectManage(project: Project) {
+  managingProject.value = project
+  showManage.value = true
+}
+
+async function projectManaged() {
+  const projectID = managingProject.value?.id
+  await loadProjects()
+  if (projectID) {
+    managingProject.value = projects.value.find((project) => project.id === projectID) ?? null
+  }
+}
+
+function projectDeleted() {
+  showManage.value = false
+  managingProject.value = null
+  void loadProjects()
+}
+
 function statusLabel(project: Project) {
   if (project.branches.some((branch) => branch.status === 'running')) return '同步中'
   if (project.branches.some((branch) => branch.status === 'failed')) return '部分异常'
@@ -105,7 +132,7 @@ function formatProjectTime(value: string) {
 
 <template>
   <div class="page-shell">
-    <AppHeader @users="showUsers = true" />
+    <AppHeader />
     <main class="projects-main">
       <section class="projects-hero">
         <div>
@@ -164,16 +191,20 @@ function formatProjectTime(value: string) {
             <span>最近更新</span>
             <span />
           </div>
-          <button
+          <div
             v-for="project in filteredProjects"
             :key="project.id"
             class="project-list-row"
-            @click="router.push({ name: 'project', params: { slug: project.slug } })"
+            role="button"
+            tabindex="0"
+            @click="openProject(project)"
+            @keydown.enter="openProject(project)"
+            @keydown.space.prevent="openProject(project)"
           >
             <div class="project-list-main">
               <span class="project-icon">{{ project.name.slice(0, 1).toUpperCase() }}</span>
               <span class="project-list-copy">
-                <strong>{{ project.name }}</strong>
+                <strong>{{ project.name }} <NTag size="small">{{ project.isPublic ? '公开' : '私有' }}</NTag></strong>
                 <small>{{ project.repoUrl }}</small>
               </span>
             </div>
@@ -187,21 +218,47 @@ function formatProjectTime(value: string) {
             <span class="project-list-date" :title="project.updatedAt">
               {{ formatProjectTime(project.updatedAt) }}
             </span>
-            <ChevronForwardOutline class="project-list-arrow" />
-          </button>
+            <div class="project-list-actions">
+              <NButton
+                v-if="session.isAdmin.value"
+                size="tiny"
+                secondary
+                @click.stop="openProjectManage(project)"
+              >
+                <template #icon><SettingsOutline /></template>
+                管理
+              </NButton>
+              <ChevronForwardOutline class="project-list-arrow" />
+            </div>
+          </div>
         </div>
         <div v-else-if="filteredProjects.length" class="project-grid">
-          <button
+          <article
             v-for="project in filteredProjects"
             :key="project.id"
             class="project-card"
-            @click="router.push({ name: 'project', params: { slug: project.slug } })"
+            role="button"
+            tabindex="0"
+            @click="openProject(project)"
+            @keydown.enter="openProject(project)"
+            @keydown.space.prevent="openProject(project)"
           >
             <div class="project-card-topline">
               <span class="project-icon">{{ project.name.slice(0, 1).toUpperCase() }}</span>
-              <NTag :type="statusType(project)" size="small">{{ statusLabel(project) }}</NTag>
+              <div class="project-card-actions">
+                <NTag :type="statusType(project)" size="small">{{ statusLabel(project) }}</NTag>
+                <NButton
+                  v-if="session.isAdmin.value"
+                  size="tiny"
+                  secondary
+                  @click.stop="openProjectManage(project)"
+                >
+                  <template #icon><SettingsOutline /></template>
+                  管理
+                </NButton>
+              </div>
             </div>
-            <h2>{{ project.name }}</h2>
+            <h2>{{ project.name }} <NTag size="small">{{ project.isPublic ? '公开' : '私有' }}</NTag></h2>
             <p class="project-path">{{ project.repoUrl }}</p>
             <div class="project-meta">
               <span><GitBranchOutline /> {{ project.branches.length }} 个分支</span>
@@ -211,7 +268,7 @@ function formatProjectTime(value: string) {
               <span v-for="branch in project.branches.slice(0, 4)" :key="branch.id">{{ branch.name }}</span>
               <span v-if="project.branches.length > 4">+{{ project.branches.length - 4 }}</span>
             </div>
-          </button>
+          </article>
         </div>
         <div v-else-if="!loading" class="empty-state">
           <NEmpty
@@ -227,6 +284,12 @@ function formatProjectTime(value: string) {
     </main>
 
     <ProjectFormModal v-model:show="showCreate" @saved="projectSaved" />
-    <UsersModal v-model:show="showUsers" />
+    <ProjectManageModal
+      v-if="session.isAdmin.value && managingProject"
+      v-model:show="showManage"
+      :project="managingProject"
+      @changed="projectManaged"
+      @deleted="projectDeleted"
+    />
   </div>
 </template>

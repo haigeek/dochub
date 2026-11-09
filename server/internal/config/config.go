@@ -36,7 +36,6 @@ func Load() (Config, error) {
 	}
 	cfg.GitHostAllowlist = splitList(os.Getenv("GIT_HOST_ALLOWLIST"))
 	cfg.CookieSecure = envBool("COOKIE_SECURE", false)
-
 	if raw := os.Getenv("SESSION_TTL"); raw != "" {
 		duration, err := time.ParseDuration(raw)
 		if err != nil {

@@ -9,6 +9,7 @@ import {
   NEmpty,
   NInput,
   NModal,
+  NPopover,
   NSelect,
   NSpin,
   NTag,
@@ -16,9 +17,11 @@ import {
 } from 'naive-ui'
 import {
   ChevronBackOutline,
+  CopyOutline,
   DownloadOutline,
   EllipsisHorizontal,
   GitBranchOutline,
+  KeyOutline,
   ListOutline,
   MenuOutline,
   RefreshOutline,
@@ -27,12 +30,14 @@ import {
 } from '@vicons/ionicons5'
 import AppHeader from '@/components/AppHeader.vue'
 import DocSidebarNode from '@/components/DocSidebarNode.vue'
+import DocumentAccessModal from '@/components/DocumentAccessModal.vue'
 import MarkdownArticle from '@/components/MarkdownArticle.vue'
 import ProjectManageModal from '@/components/ProjectManageModal.vue'
-import UsersModal from '@/components/UsersModal.vue'
 import { api, downloadFile } from '@/api'
+import { useSession } from '@/session'
 import type {
   Branch,
+  AccessToken,
   DocumentContent,
   DocumentItem,
   Heading,
@@ -45,8 +50,9 @@ import type {
 const route = useRoute()
 const router = useRouter()
 const message = useMessage()
+const session = useSession()
 const showManage = ref(false)
-const showUsers = ref(false)
+const showDocumentAccess = ref(false)
 const showSearch = ref(false)
 const showMobileTree = ref(false)
 const showMobileTOC = ref(false)
@@ -54,6 +60,10 @@ const loading = ref(true)
 const documentLoading = ref(false)
 const syncing = ref(false)
 const downloading = ref(false)
+const agentTokensLoading = ref(false)
+const showAgentCopy = ref(false)
+const showMobileAgentCopy = ref(false)
+const agentTokens = ref<AccessToken[]>([])
 const project = ref<Project | null>(null)
 const branchName = ref('')
 const documents = ref<DocumentItem[]>([])
@@ -70,6 +80,11 @@ let unmounted = false
 
 const currentBranch = computed(() =>
   project.value?.branches.find((branch) => branch.name === branchName.value) ?? null,
+)
+const canManage = computed(
+  () =>
+    session.isAdmin.value ||
+    (!!session.user.value && session.user.value.id === project.value?.ownerId),
 )
 const lastSyncLabel = computed(() => formatSyncTime(currentBranch.value?.lastSyncedAt ?? null))
 const branchOptions = computed(() =>
@@ -346,6 +361,52 @@ async function downloadCurrentDocument() {
   }
 }
 
+async function onAgentCopyPopover(show: boolean, mobile = false) {
+  const state = mobile ? showMobileAgentCopy : showAgentCopy
+  state.value = show
+  if (!show) return
+  agentTokensLoading.value = true
+  try {
+    agentTokens.value = await api<AccessToken[]>('/api/account/tokens')
+    if (agentTokens.value.length === 0) {
+      message.warning('请先点击个人头像，在“Agent 凭证”中创建凭证')
+      return
+    }
+    if (agentTokens.value.length === 1) {
+      await copyAgentCommand(agentTokens.value[0])
+    }
+  } catch (reason) {
+    message.error(reason instanceof Error ? reason.message : '读取 Agent 凭证失败')
+  } finally {
+    agentTokensLoading.value = false
+  }
+}
+
+async function copyAgentCommand(token: AccessToken) {
+  if (!project.value || !document.value || !branchName.value) return
+  const url = new URL(
+    `/api/projects/${project.value.id}/doc/download?branch=${encodeURIComponent(branchName.value)}&path=${encodeURIComponent(document.value.path)}`,
+    window.location.origin,
+  ).toString()
+  const command = [
+    'curl --fail --silent --show-error \\',
+    `  -H 'Authorization: Bearer ${token.token}' \\`,
+    `  ${shellSingleQuote(url)}`,
+  ].join('\n')
+  try {
+    await navigator.clipboard.writeText(command)
+    showAgentCopy.value = false
+    showMobileAgentCopy.value = false
+    message.success(`已复制 ${token.name} 的 Agent 读取命令`)
+  } catch {
+    message.error('复制失败，请检查浏览器剪贴板权限')
+  }
+}
+
+function shellSingleQuote(value: string) {
+  return `'${value.replaceAll("'", "'\\''")}'`
+}
+
 function openSearch() {
   showSearch.value = true
   searchQuery.value = ''
@@ -470,6 +531,11 @@ function openManage() {
   showManage.value = true
 }
 
+function openDocumentAccess() {
+  if (!document.value) return
+  showDocumentAccess.value = true
+}
+
 function delay(milliseconds: number) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds))
 }
@@ -485,7 +551,7 @@ function safeDecodeAnchor(value: string) {
 
 <template>
   <div class="docs-page">
-    <AppHeader back-to-projects @users="showUsers = true">
+    <AppHeader back-to-projects>
       <template #project-nav>
         <div v-if="project" class="project-heading">
           <button class="back-icon" title="返回项目" @click="router.push('/projects')">
@@ -517,12 +583,53 @@ function safeDecodeAnchor(value: string) {
             <template #icon><DownloadOutline /></template>
             下载
           </NButton>
+          <NPopover
+            v-if="document"
+            :show="showAgentCopy"
+            trigger="click"
+            placement="bottom-end"
+            @update:show="onAgentCopyPopover($event, false)"
+          >
+            <template #trigger>
+              <NButton class="agent-copy-button" quaternary>
+                <template #icon><CopyOutline /></template>
+                复制给 Agent
+              </NButton>
+            </template>
+            <div class="agent-copy-panel">
+              <NSpin :show="agentTokensLoading">
+                <span class="agent-copy-hint">选择一个凭证，复制当前文档的 curl 命令：</span>
+                <span v-if="!agentTokensLoading && agentTokens.length === 0" class="agent-copy-empty">
+                  尚未创建凭证，请点击个人头像创建。
+                </span>
+                <button
+                  v-for="token in agentTokens"
+                  :key="token.id"
+                  class="agent-token-option"
+                  @click="copyAgentCommand(token)"
+                >
+                  <strong>{{ token.name }}</strong>
+                  <small>{{ token.prefix }}…</small>
+                </button>
+              </NSpin>
+            </div>
+          </NPopover>
+          <NButton
+            v-if="document && canManage"
+            class="document-access-button"
+            quaternary
+            @click="openDocumentAccess"
+          >
+            <template #icon><KeyOutline /></template>
+            文档权限
+          </NButton>
           <NButton class="search-button" quaternary @click="openSearch">
             <template #icon><SearchOutline /></template>
             搜索
             <span class="search-shortcut">⌘ K</span>
           </NButton>
           <NButton
+            v-if="canManage"
             class="sync-button"
             type="primary"
             :loading="syncing"
@@ -532,7 +639,7 @@ function safeDecodeAnchor(value: string) {
             <template #icon><RefreshOutline /></template>
             同步
           </NButton>
-          <NButton quaternary circle title="项目管理" @click="openManage">
+          <NButton v-if="canManage" quaternary circle title="项目管理" @click="openManage">
             <template #icon><EllipsisHorizontal /></template>
           </NButton>
         </div>
@@ -591,6 +698,46 @@ function safeDecodeAnchor(value: string) {
             <template #icon><DownloadOutline /></template>
             下载
           </NButton>
+          <NPopover
+            v-if="document"
+            :show="showMobileAgentCopy"
+            trigger="click"
+            placement="bottom-end"
+            @update:show="onAgentCopyPopover($event, true)"
+          >
+            <template #trigger>
+              <NButton secondary size="small">
+                <template #icon><CopyOutline /></template>
+                Agent
+              </NButton>
+            </template>
+            <div class="agent-copy-panel">
+              <NSpin :show="agentTokensLoading">
+                <span class="agent-copy-hint">选择一个凭证，复制当前文档的 curl 命令：</span>
+                <span v-if="!agentTokensLoading && agentTokens.length === 0" class="agent-copy-empty">
+                  尚未创建凭证，请点击个人头像创建。
+                </span>
+                <button
+                  v-for="token in agentTokens"
+                  :key="token.id"
+                  class="agent-token-option"
+                  @click="copyAgentCommand(token)"
+                >
+                  <strong>{{ token.name }}</strong>
+                  <small>{{ token.prefix }}…</small>
+                </button>
+              </NSpin>
+            </div>
+          </NPopover>
+          <NButton
+            v-if="document && canManage"
+            secondary
+            size="small"
+            @click="openDocumentAccess"
+          >
+            <template #icon><KeyOutline /></template>
+            文档权限
+          </NButton>
           <span class="mobile-sync-time">
             <TimeOutline />
             {{ lastSyncLabel }}
@@ -612,7 +759,9 @@ function safeDecodeAnchor(value: string) {
               :description="
                 currentBranch?.status === 'failed'
                   ? '当前分支暂无可用文档快照'
-                  : '正在等待文档同步完成'
+                  : currentBranch?.status === 'succeeded'
+                    ? '当前分支没有可访问的文档'
+                    : '正在等待文档同步完成'
               "
             >
               <template #extra>
@@ -719,11 +868,17 @@ function safeDecodeAnchor(value: string) {
     </NModal>
 
     <ProjectManageModal
+      v-if="canManage"
       v-model:show="showManage"
       :project="project"
       @changed="onProjectChanged"
       @deleted="onProjectDeleted"
     />
-    <UsersModal v-model:show="showUsers" />
+    <DocumentAccessModal
+      v-if="canManage && document"
+      v-model:show="showDocumentAccess"
+      :project="project"
+      :document-path="document.path"
+    />
   </div>
 </template>

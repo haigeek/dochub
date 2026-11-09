@@ -21,6 +21,7 @@ import (
 
 	"dochub/internal/config"
 	"dochub/internal/docs"
+	"dochub/internal/secretbox"
 	"dochub/internal/store"
 )
 
@@ -35,18 +36,24 @@ const (
 )
 
 type Server struct {
-	cfg  config.Config
-	db   *store.Store
-	docs *docs.Service
+	cfg     config.Config
+	db      *store.Store
+	docs    *docs.Service
+	secrets *secretbox.Box
 }
 
 func New(cfg config.Config, db *store.Store, docsService *docs.Service) *Server {
-	return &Server{cfg: cfg, db: db, docs: docsService}
+	return &Server{cfg: cfg, db: db, docs: docsService, secrets: secretbox.New(cfg.StorageDir)}
 }
 
 func (s *Server) Router() *gin.Engine {
 	router := gin.New()
-	router.Use(gin.Logger(), gin.Recovery(), securityHeaders())
+	router.Use(gin.LoggerWithConfig(gin.LoggerConfig{
+		Skip: func(c *gin.Context) bool {
+			return c.Request.URL.Path == "/api/auth/collie/callback" ||
+				(strings.HasPrefix(c.Request.URL.Path, "/api/auth/oauth2/") && strings.HasSuffix(c.Request.URL.Path, "/callback"))
+		},
+	}), gin.Recovery(), securityHeaders())
 	_ = router.SetTrustedProxies(nil)
 	router.Use(limitRequestBody(1 << 20))
 
@@ -56,10 +63,25 @@ func (s *Server) Router() *gin.Engine {
 
 	api := router.Group("/api")
 	api.POST("/auth/login", s.login)
+	api.GET("/auth/options", s.authOptions)
+	api.GET("/auth/oauth2/:provider/start", s.oauthStart)
+	api.GET("/auth/oauth2/:provider/callback", s.oauthCallback)
+	api.GET("/auth/collie/start", func(c *gin.Context) {
+		c.Params = append(c.Params, gin.Param{Key: "provider", Value: "collie"})
+		s.oauthStart(c)
+	})
+	api.GET("/auth/collie/callback", func(c *gin.Context) {
+		c.Params = append(c.Params, gin.Param{Key: "provider", Value: "collie"})
+		s.oauthCallback(c)
+	})
 	protected := api.Group("")
 	protected.Use(s.authenticate())
 	protected.GET("/auth/me", s.me)
+	protected.PUT("/auth/password", s.changePassword)
 	protected.POST("/auth/logout", s.logout)
+	protected.GET("/account/tokens", s.listAccessTokens)
+	protected.POST("/account/tokens", s.createAccessToken)
+	protected.DELETE("/account/tokens/:tokenId", s.deleteAccessToken)
 
 	protected.GET("/projects", s.listProjects)
 	protected.POST("/projects", s.createProject)
@@ -76,8 +98,24 @@ func (s *Server) Router() *gin.Engine {
 	protected.GET("/projects/:id/search", s.search)
 	protected.GET("/jobs/:id", s.job)
 
+	protected.GET("/users/directory", s.userDirectory)
 	protected.GET("/users", s.listUsers)
 	protected.POST("/users", s.createUser)
+	protected.PATCH("/users/:id/role", s.updateUserRole)
+	protected.GET("/organizations/directory", s.organizationDirectory)
+	protected.GET("/admin/organizations", s.listOrganizations)
+	protected.POST("/admin/organizations", s.createOrganization)
+	protected.PUT("/admin/organizations/:id", s.updateOrganization)
+	protected.DELETE("/admin/organizations/:id", s.deleteOrganization)
+	protected.PUT("/admin/users/:id/organizations", s.setUserOrganizations)
+	protected.GET("/admin/sso", s.listSSOSettings)
+	protected.POST("/admin/sso", s.createSSOSettings)
+	protected.GET("/admin/sso/:id", s.getSSOSettings)
+	protected.PUT("/admin/sso/:id", s.updateSSOSettings)
+	protected.DELETE("/admin/sso/:id", s.deleteSSOSettings)
+	protected.GET("/projects/:id/access", s.projectAccess)
+	protected.PUT("/projects/:id/access/project", s.setProjectAccess)
+	protected.PUT("/projects/:id/access/document", s.setDocumentAccess)
 
 	s.mountFrontend(router)
 	return router
@@ -97,24 +135,27 @@ func (s *Server) login(c *gin.Context) {
 		fail(c, http.StatusUnauthorized, "INVALID_CREDENTIALS", "用户名或密码错误", "")
 		return
 	}
-	token := randomToken(32)
-	csrf := randomToken(24)
-	expiresAt := time.Now().Add(s.cfg.SessionTTL)
-	if err := s.db.CreateSession(c, user.ID, hashToken(token), csrf, expiresAt); err != nil {
+	csrf, err := s.establishSession(c, user.ID)
+	if err != nil {
 		fail(c, http.StatusInternalServerError, "SESSION_FAILED", "登录失败", err.Error())
 		return
 	}
-	http.SetCookie(c.Writer, &http.Cookie{
-		Name:     sessionCookie,
-		Value:    token,
-		Path:     "/",
-		HttpOnly: true,
-		Secure:   s.cfg.CookieSecure,
-		SameSite: http.SameSiteLaxMode,
-		Expires:  expiresAt,
-		MaxAge:   int(s.cfg.SessionTTL.Seconds()),
-	})
 	c.JSON(http.StatusOK, gin.H{"data": gin.H{"user": user, "csrfToken": csrf}})
+}
+
+func (s *Server) establishSession(c *gin.Context, userID string) (string, error) {
+	token := randomToken(32)
+	csrf := randomToken(24)
+	expiresAt := time.Now().Add(s.cfg.SessionTTL)
+	if err := s.db.CreateSession(c, userID, hashToken(token), csrf, expiresAt); err != nil {
+		return "", err
+	}
+	http.SetCookie(c.Writer, &http.Cookie{
+		Name: sessionCookie, Value: token, Path: "/", HttpOnly: true,
+		Secure: s.cfg.CookieSecure, SameSite: http.SameSiteLaxMode,
+		Expires: expiresAt, MaxAge: int(s.cfg.SessionTTL.Seconds()),
+	})
+	return csrf, nil
 }
 
 func (s *Server) me(c *gin.Context) {
@@ -134,35 +175,116 @@ func (s *Server) logout(c *gin.Context) {
 	c.Status(http.StatusNoContent)
 }
 
+func (s *Server) changePassword(c *gin.Context) {
+	var input struct {
+		CurrentPassword string `json:"currentPassword"`
+		NewPassword     string `json:"newPassword"`
+	}
+	if err := c.ShouldBindJSON(&input); err != nil {
+		fail(c, http.StatusBadRequest, "INVALID_PASSWORD", "密码参数无效", "")
+		return
+	}
+	if len([]rune(input.NewPassword)) < 8 || len([]byte(input.NewPassword)) > 72 {
+		fail(c, http.StatusBadRequest, "INVALID_PASSWORD", "新密码至少 8 位且不能超过 72 字节", "")
+		return
+	}
+	user := currentUser(c)
+	if user.HasPassword {
+		hash, err := s.db.UserPasswordHash(c, user.ID)
+		if err != nil {
+			internal(c, err)
+			return
+		}
+		if input.CurrentPassword == "" ||
+			bcrypt.CompareHashAndPassword([]byte(hash), []byte(input.CurrentPassword)) != nil {
+			fail(c, http.StatusBadRequest, "INVALID_PASSWORD", "当前密码不正确", "")
+			return
+		}
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(input.NewPassword), 12)
+	if err != nil {
+		internal(c, err)
+		return
+	}
+	if err := s.db.UpdatePassword(c, user.ID, string(hash), c.GetString(string(contextSID))); err != nil {
+		internal(c, err)
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+
 func (s *Server) authenticate() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		token, err := c.Cookie(sessionCookie)
-		if err != nil || token == "" {
+		var user store.User
+		var csrf string
+		var sessionID string
+		token, cookieErr := c.Cookie(sessionCookie)
+		if cookieErr == nil && token != "" {
+			var err error
+			user, csrf, err = s.db.UserBySession(c, hashToken(token))
+			if err == nil {
+				sessionID = hashToken(token)
+			}
+		}
+		if user.ID == "" && isSafeHTTPMethod(c.Request.Method) {
+			if rawToken := bearerToken(c.GetHeader("Authorization")); rawToken != "" {
+				var err error
+				user, err = s.db.AccessTokenUser(c, hashToken(rawToken))
+				if err != nil || !supportsAccessToken(c.Request.Method, c.Request.URL.Path) {
+					fail(c, http.StatusUnauthorized, "UNAUTHENTICATED", "Agent 凭证无效或已失效", "")
+					c.Abort()
+					return
+				}
+			}
+		}
+		if user.ID == "" && isSafeHTTPMethod(c.Request.Method) {
+			if _, _, ok := c.Request.BasicAuth(); ok {
+				var authenticated bool
+				user, authenticated = s.authenticateBasic(c)
+				if !authenticated {
+					challengeBasicAuth(c)
+					fail(c, http.StatusUnauthorized, "UNAUTHENTICATED", "用户名或密码错误", "")
+					c.Abort()
+					return
+				}
+			}
+		}
+		if user.ID == "" {
+			if supportsBasicAuth(c.Request.Method, c.Request.URL.Path) {
+				challengeBasicAuth(c)
+			}
 			fail(c, http.StatusUnauthorized, "UNAUTHENTICATED", "请先登录", "")
 			c.Abort()
 			return
 		}
-		user, csrf, err := s.db.UserBySession(c, hashToken(token))
-		if err != nil {
-			fail(c, http.StatusUnauthorized, "UNAUTHENTICATED", "登录已过期，请重新登录", "")
-			c.Abort()
-			return
-		}
-		if c.Request.Method != http.MethodGet && c.Request.Method != http.MethodHead &&
-			c.GetHeader("X-CSRF-Token") != csrf {
+		if !isSafeHTTPMethod(c.Request.Method) && c.GetHeader("X-CSRF-Token") != csrf {
 			fail(c, http.StatusForbidden, "INVALID_CSRF", "请求校验失败，请刷新页面后重试", "")
 			c.Abort()
 			return
 		}
 		c.Set(string(contextUser), user)
 		c.Set(string(contextCSRF), csrf)
-		c.Set(string(contextSID), hashToken(token))
+		c.Set(string(contextSID), sessionID)
 		c.Next()
 	}
 }
 
+func (s *Server) authenticateBasic(c *gin.Context) (store.User, bool) {
+	username, password, ok := c.Request.BasicAuth()
+	if !ok || password == "" || len(password) > 1024 {
+		return store.User{}, false
+	}
+	user, hash, err := s.db.UserByUsername(c, username)
+	if err != nil || hash == "" ||
+		bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)) != nil {
+		return store.User{}, false
+	}
+	return user, true
+}
+
 func (s *Server) listProjects(c *gin.Context) {
-	projects, err := s.db.ListProjects(c)
+	user := currentUser(c)
+	projects, err := s.db.ListProjects(c, user.ID, user.Role == "admin")
 	if err != nil {
 		internal(c, err)
 		return
@@ -180,6 +302,7 @@ func (s *Server) createProject(c *gin.Context) {
 		DocRoot  string   `json:"docRoot"`
 		DocRoots []string `json:"docRoots"`
 		Branches []string `json:"branches"`
+		IsPublic bool     `json:"isPublic"`
 	}
 	if err := c.ShouldBindJSON(&input); err != nil {
 		fail(c, http.StatusBadRequest, "INVALID_REQUEST", "项目参数不完整", err.Error())
@@ -210,7 +333,7 @@ func (s *Server) createProject(c *gin.Context) {
 		return
 	}
 	user := currentUser(c)
-	project, err := s.db.CreateProject(c, input.Name, input.RepoURL, docRoots, user.ID, branches)
+	project, err := s.db.CreateProject(c, input.Name, input.RepoURL, docRoots, user.ID, branches, input.IsPublic)
 	if err != nil {
 		if errors.Is(err, store.ErrSlugExists) {
 			slug, _ := store.ProjectSlug(input.RepoURL)
@@ -230,8 +353,11 @@ func (s *Server) createProject(c *gin.Context) {
 }
 
 func (s *Server) getProject(c *gin.Context) {
-	project, err := s.db.Project(c, c.Param("id"))
-	respondRecord(c, project, err)
+	project, _, ok := s.requireProjectRead(c, c.Param("id"))
+	if !ok {
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": project})
 }
 
 func (s *Server) updateProject(c *gin.Context) {
@@ -244,6 +370,7 @@ func (s *Server) updateProject(c *gin.Context) {
 		RepoURL  string   `json:"repoUrl"`
 		DocRoot  string   `json:"docRoot"`
 		DocRoots []string `json:"docRoots"`
+		IsPublic *bool    `json:"isPublic"`
 	}
 	if err := c.ShouldBindJSON(&input); err != nil {
 		fail(c, http.StatusBadRequest, "INVALID_REQUEST", "项目参数不完整", err.Error())
@@ -270,7 +397,12 @@ func (s *Server) updateProject(c *gin.Context) {
 		return
 	}
 	configChanged := input.RepoURL != project.RepoURL || !slices.Equal(docRoots, project.DocRoots)
-	if err := s.db.UpdateProject(c, project.ID, input.Name, input.RepoURL, docRoots); err != nil {
+	// 旧客户端未提交可见范围时不修改该字段；仅切换权限时无需重新同步仓库。
+	isPublic := project.IsPublic
+	if input.IsPublic != nil {
+		isPublic = *input.IsPublic
+	}
+	if err := s.db.UpdateProject(c, project.ID, input.Name, input.RepoURL, docRoots, isPublic); err != nil {
 		internal(c, err)
 		return
 	}
@@ -355,9 +487,8 @@ func (s *Server) deleteBranch(c *gin.Context) {
 }
 
 func (s *Server) syncBranch(c *gin.Context) {
-	project, err := s.db.Project(c, c.Param("id"))
-	if err != nil {
-		respondRecord(c, nil, err)
+	project, ok := s.manageableProject(c)
+	if !ok {
 		return
 	}
 	var input struct {
@@ -385,12 +516,11 @@ func (s *Server) documentTree(c *gin.Context) {
 		fail(c, http.StatusBadRequest, "INVALID_BRANCH", "缺少分支名称", "")
 		return
 	}
-	project, err := s.db.Project(c, c.Param("id"))
-	if err != nil {
-		respondRecord(c, nil, err)
+	project, access, ok := s.requireProjectRead(c, c.Param("id"))
+	if !ok {
 		return
 	}
-	documents, err := s.db.ListDocuments(c, project.ID, branch)
+	documents, err := s.db.ListDocuments(c, project.ID, branch, access.full, access.documents)
 	if err != nil {
 		internal(c, err)
 		return
@@ -398,7 +528,10 @@ func (s *Server) documentTree(c *gin.Context) {
 	if documents == nil {
 		documents = []store.Document{}
 	}
-	c.JSON(http.StatusOK, gin.H{"data": gin.H{"docRoots": project.DocRoots, "documents": documents}})
+	c.JSON(http.StatusOK, gin.H{"data": gin.H{
+		"docRoots":  visibleDocRoots(project.DocRoots, documents, access.full),
+		"documents": documents,
+	}})
 }
 
 func (s *Server) document(c *gin.Context) {
@@ -408,7 +541,16 @@ func (s *Server) document(c *gin.Context) {
 		fail(c, http.StatusBadRequest, "INVALID_PATH", err.Error(), "")
 		return
 	}
-	doc, err := s.db.Document(c, c.Param("id"), branch, docPath)
+	project, access, ok := s.requireProjectRead(c, c.Param("id"))
+	if !ok {
+		return
+	}
+	_, documentAllowed := access.documentSet[docPath]
+	if !access.full && !documentAllowed {
+		fail(c, http.StatusForbidden, "DOCUMENT_FORBIDDEN", "没有该文档的读取权限", "")
+		return
+	}
+	doc, err := s.db.Document(c, project.ID, branch, docPath)
 	if err != nil {
 		respondRecord(c, nil, err)
 		return
@@ -423,7 +565,16 @@ func (s *Server) downloadDocument(c *gin.Context) {
 		fail(c, http.StatusBadRequest, "INVALID_PATH", err.Error(), "")
 		return
 	}
-	doc, err := s.db.Document(c, c.Param("id"), branch, docPath)
+	project, access, ok := s.requireProjectRead(c, c.Param("id"))
+	if !ok {
+		return
+	}
+	_, documentAllowed := access.documentSet[docPath]
+	if !access.full && !documentAllowed {
+		fail(c, http.StatusForbidden, "DOCUMENT_FORBIDDEN", "没有该文档的读取权限", "")
+		return
+	}
+	doc, err := s.db.Document(c, project.ID, branch, docPath)
 	if err != nil {
 		respondRecord(c, nil, err)
 		return
@@ -438,7 +589,27 @@ func (s *Server) downloadDocument(c *gin.Context) {
 func (s *Server) asset(c *gin.Context) {
 	branch := c.Query("branch")
 	relative := strings.TrimPrefix(c.Param("assetPath"), "/")
-	resolved, err := s.docs.ResolveAsset(c, c.Param("id"), branch, relative)
+	project, access, ok := s.requireProjectRead(c, c.Param("id"))
+	if !ok {
+		return
+	}
+	if !access.full {
+		cleanAsset, err := cleanAssetPath(relative)
+		if err != nil {
+			fail(c, http.StatusBadRequest, "INVALID_PATH", err.Error(), "")
+			return
+		}
+		allowed, err := s.db.CanReadDocumentAsset(c, project.ID, branch, currentUser(c).ID, cleanAsset)
+		if err != nil {
+			internal(c, err)
+			return
+		}
+		if !allowed {
+			fail(c, http.StatusForbidden, "ASSET_FORBIDDEN", "没有该资源的读取权限", "")
+			return
+		}
+	}
+	resolved, err := s.docs.ResolveAsset(c, project.ID, branch, relative)
 	if err != nil {
 		respondRecord(c, nil, err)
 		return
@@ -462,7 +633,13 @@ func (s *Server) search(c *gin.Context) {
 		fail(c, http.StatusBadRequest, "QUERY_TOO_LONG", "搜索关键词不能超过 100 个字符", "")
 		return
 	}
-	results, err := s.db.SearchDocuments(c, c.Param("id"), c.Query("branch"), query, 20)
+	project, access, ok := s.requireProjectRead(c, c.Param("id"))
+	if !ok {
+		return
+	}
+	results, err := s.db.SearchDocuments(
+		c, project.ID, c.Query("branch"), query, 20, access.full, access.documents,
+	)
 	if err != nil {
 		internal(c, err)
 		return
@@ -475,7 +652,26 @@ func (s *Server) search(c *gin.Context) {
 
 func (s *Server) job(c *gin.Context) {
 	job, err := s.db.Job(c, c.Param("id"))
-	respondRecord(c, job, err)
+	if err != nil {
+		respondRecord(c, nil, err)
+		return
+	}
+	if _, _, ok := s.requireProjectRead(c, job.ProjectID); !ok {
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": job})
+}
+
+func (s *Server) userDirectory(c *gin.Context) {
+	users, err := s.db.ListUserSummaries(c)
+	if err != nil {
+		internal(c, err)
+		return
+	}
+	if users == nil {
+		users = []store.UserSummary{}
+	}
+	c.JSON(http.StatusOK, gin.H{"data": users})
 }
 
 func (s *Server) listUsers(c *gin.Context) {
@@ -517,6 +713,143 @@ func (s *Server) createUser(c *gin.Context) {
 	c.JSON(http.StatusCreated, gin.H{"data": user})
 }
 
+func (s *Server) updateUserRole(c *gin.Context) {
+	if !requireAdmin(c) {
+		return
+	}
+	var input struct {
+		Role string `json:"role"`
+	}
+	if err := c.ShouldBindJSON(&input); err != nil ||
+		(input.Role != "admin" && input.Role != "member") {
+		fail(c, http.StatusBadRequest, "INVALID_USER", "角色必须为管理员或成员", "")
+		return
+	}
+	userID := c.Param("id")
+	if userID == currentUser(c).ID {
+		fail(c, http.StatusBadRequest, "SELF_ROLE_CHANGE", "不能修改自己的角色", "")
+		return
+	}
+	user, err := s.db.UpdateUserRole(c, userID, input.Role)
+	if errors.Is(err, store.ErrNotFound) {
+		fail(c, http.StatusNotFound, "USER_NOT_FOUND", "用户不存在", "")
+		return
+	}
+	if errors.Is(err, store.ErrLastAdmin) {
+		fail(c, http.StatusConflict, "LAST_ADMIN", err.Error(), "")
+		return
+	}
+	if err != nil {
+		internal(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": user})
+}
+
+func (s *Server) projectAccess(c *gin.Context) {
+	project, ok := s.manageableProject(c)
+	if !ok {
+		return
+	}
+	access, err := s.db.ProjectAccess(c, project.ID)
+	if err != nil {
+		internal(c, err)
+		return
+	}
+	access = normalizeProjectAccess(access)
+	c.JSON(http.StatusOK, gin.H{"data": access})
+}
+
+func (s *Server) setProjectAccess(c *gin.Context) {
+	project, ok := s.manageableProject(c)
+	if !ok {
+		return
+	}
+	var input struct {
+		UserIDs         []string `json:"userIds"`
+		OrganizationIDs []string `json:"organizationIds"`
+	}
+	if err := c.ShouldBindJSON(&input); err != nil {
+		fail(c, http.StatusBadRequest, "INVALID_REQUEST", "授权用户参数无效", err.Error())
+		return
+	}
+	if err := s.db.SetProjectReadAccess(
+		c,
+		project.ID,
+		input.UserIDs,
+		input.OrganizationIDs,
+		currentUser(c).ID,
+	); err != nil {
+		accessError(c, err)
+		return
+	}
+	s.respondProjectAccess(c, project.ID)
+}
+
+func (s *Server) setDocumentAccess(c *gin.Context) {
+	project, ok := s.manageableProject(c)
+	if !ok {
+		return
+	}
+	var input struct {
+		Path            string   `json:"path"`
+		UserIDs         []string `json:"userIds"`
+		OrganizationIDs []string `json:"organizationIds"`
+	}
+	if err := c.ShouldBindJSON(&input); err != nil {
+		fail(c, http.StatusBadRequest, "INVALID_REQUEST", "文档授权参数无效", err.Error())
+		return
+	}
+	input.Path = strings.TrimSpace(input.Path)
+	if err := validateDocumentPath(input.Path); err != nil {
+		fail(c, http.StatusBadRequest, "INVALID_PATH", err.Error(), "")
+		return
+	}
+	if err := s.db.SetDocumentReadAccess(
+		c,
+		project.ID,
+		input.Path,
+		input.UserIDs,
+		input.OrganizationIDs,
+		currentUser(c).ID,
+	); err != nil {
+		accessError(c, err)
+		return
+	}
+	s.respondProjectAccess(c, project.ID)
+}
+
+func (s *Server) respondProjectAccess(c *gin.Context, projectID string) {
+	access, err := s.db.ProjectAccess(c, projectID)
+	if err != nil {
+		internal(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": normalizeProjectAccess(access)})
+}
+
+func normalizeProjectAccess(access store.ProjectAccess) store.ProjectAccess {
+	// JSON 接口统一返回空数组，避免前端把 nil 当成“数据尚未加载”。
+	if access.ProjectUsers == nil {
+		access.ProjectUsers = []store.UserSummary{}
+	}
+	if access.ProjectOrganizations == nil {
+		access.ProjectOrganizations = []store.OrganizationSummary{}
+	}
+	if access.Documents == nil {
+		access.Documents = []store.DocumentAccess{}
+	}
+	for index := range access.Documents {
+		if access.Documents[index].Users == nil {
+			access.Documents[index].Users = []store.UserSummary{}
+		}
+		if access.Documents[index].Organizations == nil {
+			access.Documents[index].Organizations = []store.OrganizationSummary{}
+		}
+	}
+	return access
+}
+
 func (s *Server) manageableProject(c *gin.Context) (store.Project, bool) {
 	requestUser := currentUser(c)
 	project, err := s.db.Project(c, c.Param("id"))
@@ -529,6 +862,91 @@ func (s *Server) manageableProject(c *gin.Context) (store.Project, bool) {
 		return store.Project{}, false
 	}
 	return project, true
+}
+
+type readAccess struct {
+	full        bool
+	documents   []string
+	documentSet map[string]struct{}
+}
+
+func (s *Server) requireProjectRead(
+	c *gin.Context,
+	identifier string,
+) (store.Project, readAccess, bool) {
+	project, err := s.db.Project(c, identifier)
+	if err != nil {
+		respondRecord(c, nil, err)
+		return store.Project{}, readAccess{}, false
+	}
+	user := currentUser(c)
+	// 创建人和管理员不受额外读取授权限制，其余成员先取项目级授权，
+	// 没有项目级授权时再按仓库内完整文档路径限定可见范围。
+	if project.IsPublic || user.Role == "admin" || user.ID == project.OwnerID {
+		return project, readAccess{full: true}, true
+	}
+	access, err := s.db.ProjectReadAccess(c, project.ID, user.ID)
+	if err != nil {
+		internal(c, err)
+		return store.Project{}, readAccess{}, false
+	}
+	if !access.Full && len(access.Documents) == 0 {
+		fail(c, http.StatusForbidden, "PROJECT_FORBIDDEN", "没有该项目的读取权限", "")
+		return store.Project{}, readAccess{}, false
+	}
+	result := readAccess{full: access.Full, documents: access.Documents}
+	if !access.Full {
+		result.documentSet = make(map[string]struct{}, len(access.Documents))
+		for _, documentPath := range access.Documents {
+			result.documentSet[documentPath] = struct{}{}
+		}
+	}
+	return project, result, true
+}
+
+func visibleDocRoots(
+	docRoots []string,
+	documents []store.Document,
+	fullAccess bool,
+) []string {
+	if fullAccess {
+		return docRoots
+	}
+	var visible []string
+	for _, docRoot := range docRoots {
+		prefix := docRoot + "/"
+		for _, document := range documents {
+			if strings.HasPrefix(document.Path, prefix) {
+				visible = append(visible, docRoot)
+				break
+			}
+		}
+	}
+	if len(visible) == 0 && len(docRoots) == 1 && len(documents) > 0 {
+		return docRoots
+	}
+	return visible
+}
+
+func cleanAssetPath(value string) (string, error) {
+	if value == "" || strings.ContainsRune(value, '\x00') ||
+		strings.HasPrefix(value, "/") || path.Clean(value) != value ||
+		value == ".." || strings.HasPrefix(value, "../") {
+		return "", errors.New("资源路径无效")
+	}
+	return value, nil
+}
+
+func accessError(c *gin.Context, err error) {
+	if errors.Is(err, store.ErrNotFound) {
+		fail(c, http.StatusBadRequest, "INVALID_USER", "授权用户不存在", "")
+		return
+	}
+	if errors.Is(err, store.ErrOrganizationNotFound) {
+		fail(c, http.StatusBadRequest, "INVALID_ORGANIZATION", "授权组织机构不存在", "")
+		return
+	}
+	internal(c, err)
 }
 
 func (s *Server) enqueue(c *gin.Context, projectID, branch string) (store.SyncJob, error) {
@@ -727,6 +1145,49 @@ func limitRequestBody(maxBytes int64) gin.HandlerFunc {
 		}
 		c.Next()
 	}
+}
+
+func isSafeHTTPMethod(method string) bool {
+	return method == http.MethodGet || method == http.MethodHead
+}
+
+func supportsBasicAuth(method, requestPath string) bool {
+	return isSafeHTTPMethod(method) && strings.HasPrefix(requestPath, "/api/projects/") &&
+		(strings.Contains(requestPath, "/assets/") || strings.HasSuffix(requestPath, "/doc/download"))
+}
+
+func bearerToken(header string) string {
+	const prefix = "Bearer "
+	if !strings.HasPrefix(header, prefix) {
+		return ""
+	}
+	return strings.TrimSpace(strings.TrimPrefix(header, prefix))
+}
+
+func supportsAccessToken(method, requestPath string) bool {
+	if !isSafeHTTPMethod(method) {
+		return false
+	}
+	parts := strings.Split(strings.Trim(requestPath, "/"), "/")
+	if len(parts) < 2 || parts[0] != "api" || parts[1] != "projects" {
+		return false
+	}
+	if len(parts) == 2 {
+		return true
+	}
+	if len(parts) == 3 {
+		return true
+	}
+	switch parts[3] {
+	case "tree", "doc", "download", "assets", "search":
+		return true
+	default:
+		return false
+	}
+}
+
+func challengeBasicAuth(c *gin.Context) {
+	c.Header("WWW-Authenticate", `Basic realm="DocHub", charset="UTF-8"`)
 }
 
 func init() {

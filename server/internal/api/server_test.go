@@ -46,3 +46,36 @@ func TestDocumentJSONFields(t *testing.T) {
 		t.Fatalf("文档 JSON 不应输出大写字段: %s", payload)
 	}
 }
+
+func TestVisibleDocRoots(t *testing.T) {
+	documents := []store.Document{
+		{Path: "docs/guide/start.md", Title: "开始"},
+		{Path: "design/ui.md", Title: "设计"},
+	}
+	roots := visibleDocRoots([]string{"docs", "design", "api"}, documents, false)
+	if len(roots) != 2 || roots[0] != "docs" || roots[1] != "design" {
+		t.Fatalf("受限目录计算结果错误: %#v", roots)
+	}
+	legacy := visibleDocRoots([]string{"docs"}, []store.Document{{Path: "guide/start.md"}}, false)
+	if len(legacy) != 1 || legacy[0] != "docs" {
+		t.Fatalf("旧版单目录兼容失败: %#v", legacy)
+	}
+}
+
+func TestNormalizeProjectAccess(t *testing.T) {
+	access := normalizeProjectAccess(store.ProjectAccess{
+		Documents: []store.DocumentAccess{{Path: "docs/start.md"}},
+	})
+	if access.ProjectUsers == nil {
+		t.Fatal("项目级用户列表应序列化为空数组")
+	}
+	if access.ProjectOrganizations == nil {
+		t.Fatal("项目级组织列表应序列化为空数组")
+	}
+	if access.Documents[0].Users == nil {
+		t.Fatal("文档级用户列表应序列化为空数组")
+	}
+	if access.Documents[0].Organizations == nil {
+		t.Fatal("文档级组织列表应序列化为空数组")
+	}
+}

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { reactive, ref, watch } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 import {
   NAlert,
   NButton,
@@ -10,13 +10,21 @@ import {
   NInput,
   NModal,
   NPopconfirm,
+  NSelect,
   NSpace,
+  NSwitch,
   NTag,
   useMessage,
 } from 'naive-ui'
 import { AddOutline, TrashOutline } from '@vicons/ionicons5'
 import { api } from '@/api'
-import type { Branch, Project } from '@/types'
+import type {
+  Branch,
+  OrganizationSummary,
+  Project,
+  ProjectAccess,
+  UserSummary,
+} from '@/types'
 
 const props = defineProps<{
   show: boolean
@@ -31,23 +39,67 @@ const emit = defineEmits<{
 const message = useMessage()
 const saving = ref(false)
 const adding = ref(false)
+const accessLoading = ref(false)
+const accessSaving = ref(false)
 const branchToAdd = ref('')
+const users = ref<UserSummary[]>([])
+const organizations = ref<OrganizationSummary[]>([])
+const projectUserIds = ref<string[]>([])
+const projectOrganizationIds = ref<string[]>([])
 const form = reactive({
   name: '',
   repoUrl: '',
   docRoots: [] as string[],
+  isPublic: false,
 })
+
+const userOptions = computed(() =>
+  users.value.map((user) => ({
+    label: `${user.username}${user.role === 'admin' ? '（管理员）' : ''}`,
+    value: user.id,
+  })),
+)
+const organizationOptions = computed(() =>
+  organizations.value.map((organization) => ({
+    label: organization.name,
+    value: organization.id,
+  })),
+)
 
 watch(
   () => [props.show, props.project] as const,
-  ([show, project]) => {
+  async ([show, project]) => {
     if (!show || !project) return
     form.name = project.name
     form.repoUrl = project.repoUrl
     form.docRoots = [...project.docRoots]
+    form.isPublic = project.isPublic
     branchToAdd.value = ''
+    await loadAccess(project.id)
   },
+  { immediate: true },
 )
+
+async function loadAccess(projectID: string) {
+  accessLoading.value = true
+  try {
+    const [directory, organizationDirectory, access] = await Promise.all([
+      api<UserSummary[]>('/api/users/directory'),
+      api<OrganizationSummary[]>('/api/organizations/directory'),
+      api<ProjectAccess>(`/api/projects/${projectID}/access`),
+    ])
+    users.value = directory
+    organizations.value = organizationDirectory
+    projectUserIds.value = access.projectUsers.map((user) => user.id)
+    projectOrganizationIds.value = access.projectOrganizations.map(
+      (organization) => organization.id,
+    )
+  } catch (reason) {
+    message.error(reason instanceof Error ? reason.message : '加载项目权限失败')
+  } finally {
+    accessLoading.value = false
+  }
+}
 
 function statusType(status: Branch['status']): 'success' | 'warning' | 'error' | 'default' {
   if (status === 'succeeded') return 'success'
@@ -120,6 +172,25 @@ async function deleteProject() {
     message.error(reason instanceof Error ? reason.message : '删除项目失败')
   }
 }
+
+async function saveProjectAccess() {
+  if (!props.project) return
+  accessSaving.value = true
+  try {
+    await api<ProjectAccess>(`/api/projects/${props.project.id}/access/project`, {
+      method: 'PUT',
+      body: JSON.stringify({
+        userIds: projectUserIds.value,
+        organizationIds: projectOrganizationIds.value,
+      }),
+    })
+    message.success('项目读取权限已更新')
+  } catch (reason) {
+    message.error(reason instanceof Error ? reason.message : '保存项目权限失败')
+  } finally {
+    accessSaving.value = false
+  }
+}
 </script>
 
 <template>
@@ -129,6 +200,12 @@ async function deleteProject() {
         <NForm label-placement="top">
           <NFormItem label="项目名称">
             <NInput v-model:value="form.name" />
+          </NFormItem>
+          <NFormItem label="可见范围">
+            <NSpace align="center">
+              <NSwitch v-model:value="form.isPublic" aria-label="公开项目" />
+              <span>{{ form.isPublic ? '公开 · 所有已登录成员可读' : '私有 · 仅授权成员可读' }}</span>
+            </NSpace>
           </NFormItem>
           <NFormItem label="SSH 仓库地址">
             <NInput v-model:value="form.repoUrl" />
@@ -144,6 +221,47 @@ async function deleteProject() {
             <NButton type="primary" :loading="saving" @click="saveProject">保存配置</NButton>
           </NSpace>
         </NForm>
+
+        <section class="manage-section">
+          <h3>项目级读取权限</h3>
+          <p class="manage-section-hint">
+            获得项目级权限的成员可以读取该项目全部分支的全部文档；组织成员授权与个人授权取并集。创建人和管理员始终拥有完整权限。
+            公开项目对所有已登录成员开放读取，以下授权在切回私有后继续生效。
+          </p>
+          <NSpace vertical>
+            <NSelect
+              v-model:value="projectUserIds"
+              to="body"
+              multiple
+              filterable
+              clearable
+              :options="userOptions"
+              :loading="accessLoading"
+              placeholder="选择可以读取整个项目的成员"
+            />
+            <NSelect
+              v-model:value="projectOrganizationIds"
+              to="body"
+              multiple
+              filterable
+              clearable
+              :options="organizationOptions"
+              :loading="accessLoading"
+              placeholder="选择可以读取整个项目的组织机构"
+            />
+            <NSpace justify="end">
+              <NButton
+                type="primary"
+                secondary
+                :loading="accessSaving"
+                :disabled="accessLoading"
+                @click="saveProjectAccess"
+              >
+                保存项目权限
+              </NButton>
+            </NSpace>
+          </NSpace>
+        </section>
 
         <section class="manage-section">
           <h3>跟踪分支</h3>

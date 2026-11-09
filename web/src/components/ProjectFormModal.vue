@@ -9,6 +9,7 @@ import {
   NFormItem,
   NInput,
   NModal,
+  NSwitch,
   NSpace,
   useMessage,
 } from 'naive-ui'
@@ -29,6 +30,7 @@ const form = reactive({
   repoUrl: '',
   docRoots: ['docs'],
   branches: ['main'],
+  isPublic: false,
 })
 
 watch(
@@ -40,6 +42,7 @@ watch(
     form.repoUrl = ''
     form.docRoots = ['docs']
     form.branches = ['main']
+    form.isPublic = false
   },
 )
 
@@ -58,6 +61,7 @@ async function submit() {
         repoUrl: form.repoUrl.trim(),
         docRoots: form.docRoots.map((value) => value.trim()).filter(Boolean),
         branches: form.branches,
+        isPublic: form.isPublic,
       }),
     })
     message.success('项目已创建，正在同步源码')
@@ -89,6 +93,12 @@ async function submit() {
       <NForm label-placement="top" @submit.prevent="submit">
         <NFormItem label="项目名称" required>
           <NInput v-model:value="form.name" placeholder="例如：服务端研发手册" />
+        </NFormItem>
+        <NFormItem label="可见范围">
+          <NSpace align="center">
+            <NSwitch v-model:value="form.isPublic" aria-label="公开项目" />
+            <span>{{ form.isPublic ? '公开 · 所有已登录成员可读' : '私有 · 仅授权成员可读' }}</span>
+          </NSpace>
         </NFormItem>
         <NFormItem label="SSH 仓库地址" required>
           <NInput

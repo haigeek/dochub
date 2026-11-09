@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"dochub/internal/config"
+	"dochub/internal/docparse"
 	"dochub/internal/store"
 )
 
@@ -445,6 +446,7 @@ func indexMarkdown(root string) ([]store.DocFile, error) {
 			Title:     extractTitle(markdown, entry.Name()),
 			Markdown:  markdown,
 			PlainText: markdownToPlainText(markdown),
+			Assets:    docparse.ExtractAssets(markdown, filepath.ToSlash(relative)),
 		})
 		return nil
 	})
