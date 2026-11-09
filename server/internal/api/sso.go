@@ -217,10 +217,20 @@ func normalizeSSORedirectURI(raw, id string) (string, error) {
 	parsed, err := url.Parse(raw)
 	if err != nil || parsed.Hostname() == "" || parsed.User != nil ||
 		(parsed.Scheme != "http" && parsed.Scheme != "https") ||
-		parsed.RawQuery != "" || parsed.Fragment != "" {
+		parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
 		return "", errors.New("回调地址必须为无查询串和 fragment 的 HTTP(S) 地址")
 	}
-	parsed.Path = oauth2.CallbackPath(id)
+	// 新建站点的占位路径替换为最终 ID，手工配置的外部回调路径保持不变。
+	if parsed.Path == "/api/auth/oauth2/pending/callback" || parsed.Path == "" || parsed.Path == "/" {
+		parsed.Path = oauth2.CallbackPath(id)
+		parsed.RawPath = ""
+	}
+	// 标准回调路由按站点 ID 分发，不能作为其他站点的外部别名。
+	if (strings.HasPrefix(parsed.Path, "/api/auth/oauth2/") &&
+		strings.HasSuffix(parsed.Path, "/callback") && parsed.Path != oauth2.CallbackPath(id)) ||
+		(parsed.Path == "/api/auth/collie/callback" && id != "collie") {
+		return "", errors.New("回调地址指向其他站点，请使用当前站点路径 " + oauth2.CallbackPath(id))
+	}
 	return parsed.String(), nil
 }
 

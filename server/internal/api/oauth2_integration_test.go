@@ -467,7 +467,7 @@ func TestSSOAdminConfiguration(t *testing.T) {
 		Enabled: true, ProviderName: "企业认证",
 		EndpointBaseURL: "http://127.0.0.1:1", AuthorizePath: "/collie/oauth2/authorize",
 		TokenPath: "/collie/oauth2/token", UserInfoPath: "/collie/oauth2/userinfo", ClientID: "client-id",
-		RedirectURI: "https://docs.test/api/auth/oauth2/sso/callback",
+		RedirectURI: "https://docs.test/api/auth/oauth2/pending/callback",
 		PortalURL:   "https://portal.example.com", TokenAuthMethod: "client_secret_post",
 		SubjectField: "sub", UsernameField: "name", Scopes: []string{},
 	}
@@ -516,7 +516,7 @@ func TestSSOAdminConfiguration(t *testing.T) {
 		"clientSecret": "second-secret", "enabled": true, "providerName": "第二身份站点",
 		"endpointBaseUrl": "http://127.0.0.1:2", "authorizePath": "/authorize",
 		"tokenPath": "/token", "userInfoPath": "/me", "clientId": "second-client",
-		"redirectUri":     "https://docs.test/api/auth/oauth2/pending/callback",
+		"redirectUri":     "https://public-docs.test/gateway/oauth/callback",
 		"tokenAuthMethod": "client_secret_post", "subjectField": "sub", "usernameField": "name",
 	})
 	second := httptest.NewRecorder()
@@ -533,6 +533,45 @@ func TestSSOAdminConfiguration(t *testing.T) {
 		second.Code != http.StatusOK || secondSaved.Data.ID == saved.Data.ID {
 		t.Fatalf("新增第二个站点失败: %d %s", second.Code, secondResponseBody)
 	}
+	if secondSaved.Data.RedirectURI != "https://public-docs.test/gateway/oauth/callback" {
+		t.Fatalf("保存后应保留自定义回调地址: %s", secondResponseBody)
+	}
+	secondStart := httptest.NewRecorder()
+	router.ServeHTTP(secondStart, httptest.NewRequest(
+		http.MethodGet, "/api/auth/oauth2/"+secondSaved.Data.ID+"/start", nil,
+	))
+	secondLocation, err := url.Parse(secondStart.Header().Get("Location"))
+	if err != nil || secondStart.Code != http.StatusFound ||
+		secondLocation.Query().Get("redirect_uri") != secondSaved.Data.RedirectURI {
+		t.Fatalf("授权跳转应使用已保存的自定义回调地址: %d %s",
+			secondStart.Code, secondStart.Header().Get("Location"))
+	}
+	var editedBody map[string]any
+	if err := json.Unmarshal(secondBody, &editedBody); err != nil {
+		t.Fatal(err)
+	}
+	editedBody["redirectUri"] = "https://public-docs.test:8443/gateway/tam/callback"
+	for _, invalidPath := range []bool{false, true} {
+		if invalidPath {
+			editedBody["redirectUri"] = "https://public-docs.test/api/auth/oauth2/collie/callback"
+		}
+		editPayload, _ := json.Marshal(editedBody)
+		editRequest := httptest.NewRequest(
+			http.MethodPut, "/api/admin/sso/"+secondSaved.Data.ID, bytes.NewReader(editPayload),
+		)
+		editRequest.Header.Set("Content-Type", "application/json")
+		editRequest.Header.Set("X-CSRF-Token", adminCSRF)
+		editRequest.AddCookie(adminCookie)
+		editedResponse := httptest.NewRecorder()
+		router.ServeHTTP(editedResponse, editRequest)
+		wantStatus := http.StatusOK
+		if invalidPath {
+			wantStatus = http.StatusBadRequest
+		}
+		if editedResponse.Code != wantStatus {
+			t.Fatalf("编辑回调地址状态错误: %d %s", editedResponse.Code, editedResponse.Body.String())
+		}
+	}
 	list = httptest.NewRecorder()
 	router.ServeHTTP(list, httptest.NewRequest(http.MethodGet, "/api/admin/sso", nil))
 	if list.Code != http.StatusUnauthorized {
@@ -546,6 +585,10 @@ func TestSSOAdminConfiguration(t *testing.T) {
 	if list.Code != http.StatusOK || !strings.Contains(list.Body.String(), saved.Data.ID) ||
 		!strings.Contains(list.Body.String(), secondSaved.Data.ID) {
 		t.Fatalf("多站点列表不完整: %s", list.Body.String())
+	}
+	if !strings.Contains(list.Body.String(),
+		`"redirectUri":"https://public-docs.test:8443/gateway/tam/callback"`) {
+		t.Fatalf("站点列表未返回实际保存的回调地址: %s", list.Body.String())
 	}
 
 	options := httptest.NewRecorder()

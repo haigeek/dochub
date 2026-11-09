@@ -1,8 +1,6 @@
 services:
   app:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: "${DOCHUB_IMAGE:-dochub:latest}"
     environment:
       APP_ADDR: ":8080"
       DATABASE_URL: "${DATABASE_URL:?请在 .env 中设置外置 PostgreSQL 连接串}"

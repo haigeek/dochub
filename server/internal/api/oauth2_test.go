@@ -4,6 +4,38 @@ import (
 	"testing"
 )
 
+func TestNormalizeSSORedirectURI(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{"new_site", "https://docs.test/api/auth/oauth2/pending/callback", "https://docs.test/api/auth/oauth2/team/callback"},
+		{"origin", "https://docs.test", "https://docs.test/api/auth/oauth2/team/callback"},
+		{"custom_origin", "https://public.test:8443/api/auth/oauth2/team/callback", "https://public.test:8443/api/auth/oauth2/team/callback"},
+		{"custom_path", "https://public.test/gateway/oauth/callback", "https://public.test/gateway/oauth/callback"},
+		{"encoded_path", "https://public.test/gateway%2Fdocs/callback", "https://public.test/gateway%2Fdocs/callback"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := normalizeSSORedirectURI(test.raw, "team")
+			if err != nil || got != test.want {
+				t.Fatalf("回调地址未按预期保留或填充: %q %v", got, err)
+			}
+		})
+	}
+	for _, raw := range []string{
+		"", "/callback", "javascript:alert(1)", "https://user:secret@docs.test/callback",
+		"https://docs.test/callback?code=value", "https://docs.test/callback?",
+		"https://docs.test/callback#fragment",
+		"https://docs.test/api/auth/oauth2/collie/callback",
+		"https://docs.test/api/auth/collie/callback",
+	} {
+		if _, err := normalizeSSORedirectURI(raw, "team"); err == nil {
+			t.Errorf("无效回调地址未被拒绝: %q", raw)
+		}
+	}
+}
+
 func TestSafeReturnPath(t *testing.T) {
 	for _, raw := range []string{
 		"", "https://evil.test", "//evil.test", "/\\evil.test", "/%2fevil.test",

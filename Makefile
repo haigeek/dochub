@@ -13,4 +13,4 @@ dev-web:
 	cd web && pnpm dev
 
 compose-up:
-	docker compose up --build
+	docker compose up

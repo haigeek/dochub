@@ -27,15 +27,22 @@ DocHub 是一个内部源码文档中心。它通过 SSH 克隆项目仓库，�
    - `SSH_KEY_FILE`：服务端 SSH 私钥路径
    - `SSH_KNOWN_HOSTS_FILE`：可信 known_hosts 路径
 
-3. 启动：
+3. 在 `.env` 中设置 `DOCHUB_IMAGE`，填写已经构建并推送的镜像地址，例如：
 
-   ```bash
-   docker compose up --build
+   ```env
+   DOCHUB_IMAGE=registry.example.com/dochub/dochub:1.0.0
    ```
 
-4. 打开 `http://localhost:8080`，使用 `ADMIN_USERNAME` 和 `ADMIN_PASSWORD` 登录。
+4. 拉取镜像并启动：
 
-Compose 只启动 DocHub 应用，不包含 PostgreSQL。数据库地址、账号和 SSL 参数全部通过 `DATABASE_URL` 提供。首次迁移会创建 `pg_trgm` 扩展，外置数据库账号需要扩展创建权限，或者由 DBA 提前执行：
+   ```bash
+   docker compose pull
+   docker compose up -d
+   ```
+
+5. 打开 `http://localhost:8080`，使用 `ADMIN_USERNAME` 和 `ADMIN_PASSWORD` 登录。
+
+Compose 只启动 DocHub 应用，不包含 PostgreSQL，也不会在启动时构建代码。数据库地址、账号和 SSL 参数全部通过 `DATABASE_URL` 提供。首次迁移会创建 `pg_trgm` 扩展，外置数据库账号需要扩展创建权限，或者由 DBA 提前执行：
 
 ```sql
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
@@ -54,6 +61,67 @@ ssh-keyscan -H git.example.com >> ~/.ssh/known_hosts
 ```
 
 SSH 私钥必须对目标仓库有只读权限。容器启动时会复制到临时目录并交给非 root 用户，不会写入数据库或镜像。
+
+## Docker 镜像构建与发布
+
+生产部署使用预构建镜像。首次使用 Buildx 时，创建并选择一个独立的 `docker-container` builder：
+
+```bash
+docker buildx create \
+  --name dochub-builder \
+  --driver docker-container \
+  --use
+docker buildx inspect --bootstrap
+```
+
+如果本机已经有可用的 Buildx builder，可以跳过创建步骤。
+
+构建仅用于本机运行的单架构镜像：
+
+```bash
+docker buildx build \
+  --tag dochub:latest \
+  --load \
+  .
+```
+
+此时将 `.env` 中的 `DOCHUB_IMAGE` 设置为 `dochub:latest`，直接启动 Compose：
+
+```bash
+docker compose up -d
+```
+
+构建并推送同时支持 `linux/amd64` 和 `linux/arm64` 的镜像。先登录镜像仓库：
+
+```bash
+docker login registry.example.com
+```
+
+然后使用带版本号和 `latest` 标签的方式构建、推送：
+
+```bash
+export IMAGE=registry.example.com/dochub/dochub
+export TAG=1.0.0
+
+docker buildx build \
+  --platform linux/amd64,linux/arm64 \
+  --tag "${IMAGE}:${TAG}" \
+  --tag "${IMAGE}:latest" \
+  --push \
+  .
+```
+
+多架构构建使用 `--push` 直接推送到镜像仓库。`--load` 只适用于单一目标架构，不能加载多架构 manifest。
+
+部署机更新镜像时，将 `.env` 中的 `DOCHUB_IMAGE` 指向目标版本，然后执行：
+
+```bash
+docker compose pull
+docker compose up -d
+docker compose ps
+```
+
+生产环境建议固定明确的版本标签，例如 `1.0.0`，避免不同机器直接使用 `latest` 时运行不同版本。
 
 ## 本地开发
 
@@ -176,8 +244,27 @@ DocHub 使用统一的 OAuth2 授权码登录接入身份服务，与本地账�
 HTTP 只适合可信内网的过渡环境。
 
 客户端密钥通过配置接口提交后，使用 AES-256-GCM 加密再写入数据库，读取配置时不会回显；
-留空保存表示保持原密钥。系统在 `STORAGE_DIR` 下首次创建 `.dochub-config-key`（权限 `0600`）作为加密密钥。
-该文件必须与数据库一起备份并限制访问；丢失后无法恢复已保存的客户端密钥，需要重新填写。
+留空保存表示保持原密钥。该密钥使用独立文件加密，具体位置、备份和恢复要求见下文。
+
+### 配置加密密钥
+
+系统在首次保存需要加密的配置时，会在 `STORAGE_DIR` 下自动创建 `.dochub-config-key`。
+该文件是 32 字节的随机密钥，权限为 `0600`，用于通过 AES-256-GCM 加密 OAuth2 客户端密钥
+以及个人 Agent 凭证的原始值。密钥文件不保存到数据库，也不需要通过环境变量配置。
+
+使用 Compose 时，容器内的 `STORAGE_DIR` 固定为 `/data`，宿主机上的默认位置是
+`./data/.dochub-config-key`；如果设置了 `DATA_DIR`，实际位置为
+`${DATA_DIR}/.dochub-config-key`。本地直接运行后端时，位置为
+`${STORAGE_DIR}/.dochub-config-key`。可以执行以下命令确认文件：
+
+```bash
+ls -l ./data/.dochub-config-key
+```
+
+运行 DocHub 的系统用户必须能够读取该文件。不要手动修改文件内容，也不要将文件提交到 Git
+或通过公开渠道传输。备份时应将 `.dochub-config-key` 与数据库备份一起保存，并分别限制访问权限。
+如果只恢复数据库而没有恢复对应的密钥，已保存的 OAuth2 客户端密钥无法解密，需要重新填写；
+已创建的 Agent 凭证也无法恢复原始令牌，需要重新创建。
 
 ### 配置方式
 
@@ -186,7 +273,9 @@ HTTP 只适合可信内网的过渡环境。
 例如 `https://identity.example.com/gateway` 加 `/oauth/token` 得到
 `https://identity.example.com/gateway/oauth/token`。path 不允许填写完整 URL、查询串、fragment 或上级目录。
 所有身份服务使用相同表单，不按厂商区分类型。每个站点由系统分配稳定 ID，
-回调地址为 `/api/auth/oauth2/<站点 ID>/callback`，配置页会显示完整地址；
+标准回调路径为 `/api/auth/oauth2/<站点 ID>/callback`，配置页自动填充完整地址并支持手动编辑。
+新建站点保存后会将默认占位路径替换为实际站点 ID；自定义外部路径会保持原样，需要反向代理转发至标准回调接口。
+点击“自动填充”可恢复基于当前访问地址生成的默认值；
 需要在对应身份服务端精确登记该完整地址。
 
 可选固定签发方用于限制来源；未配置时使用可信用户信息端点返回的 `iss`，缺少 `iss` 时使用用户信息端点地址。

@@ -32,9 +32,10 @@ const providers = ref<SSOProvider[]>([])
 const draft = ref<SSOConfig>(defaults())
 const callbackPath = ref('/api/auth/oauth2/pending/callback')
 
-const callbackURL = computed(() =>
-  draft.value.redirectUri || `${window.location.origin}${callbackPath.value}`,
-)
+const callbackURL = computed({
+  get: () => draft.value.redirectUri || `${window.location.origin}${callbackPath.value}`,
+  set: (value: string) => { draft.value.redirectUri = value },
+})
 const isNew = computed(() => !editingId.value)
 const cardTitle = computed(() => {
   if (mode.value === 'list') return '单点登录'
@@ -184,7 +185,9 @@ async function removeProvider() {
                   </NTag>
                 </div>
                 <span>{{ provider.endpointBaseUrl || '尚未配置端点' }}</span>
-                <small>{{ provider.callbackPath }}</small>
+                <small :title="provider.redirectUri">
+                  回调地址：{{ provider.redirectUri || '尚未配置' }}
+                </small>
               </div>
               <span class="sso-provider-enter">编辑 →</span>
             </button>
@@ -244,7 +247,15 @@ async function removeProvider() {
             </div>
 
             <NFormItem label="回调地址">
-              <NInput :value="callbackURL" readonly />
+              <div class="sso-callback-field">
+                <NInput v-model:value="callbackURL" placeholder="请输入身份服务登记的完整回调地址" />
+                <NButton :disabled="saving" @click="draft.redirectUri = ''">自动填充</NButton>
+                <span class="form-hint">
+                  默认按当前访问地址填充，可修改为部署环境的外部地址。
+                  自定义路径需转发至 {{ callbackPath }}，不能填写其他站点的标准回调路径；
+                  新建站点保存后请核对最终回调地址。
+                </span>
+              </div>
             </NFormItem>
             <div class="sso-form-grid">
               <NFormItem label="门户地址（可选）">

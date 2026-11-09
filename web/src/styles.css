@@ -585,6 +585,29 @@ a {
   margin-bottom: 18px;
 }
 
+.login-method-tabs {
+  margin-top: 2px;
+}
+
+.login-method-tabs .n-tabs-nav {
+  margin-bottom: 22px;
+}
+
+.login-method-tabs .n-tabs-tab {
+  font-size: 13px;
+}
+
+.login-method-description {
+  margin: 0 0 16px;
+  color: var(--vp-c-text-3);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.oauth-provider .login-footnote {
+  margin-top: 14px;
+}
+
 .login-footnote {
   margin: 22px 0 0;
   color: var(--vp-c-text-4);
@@ -1069,6 +1092,23 @@ a {
 
 .sso-advanced {
   margin-top: 4px;
+}
+
+.sso-callback-field {
+  display: flex;
+  width: 100%;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.sso-callback-field > .n-input {
+  min-width: 160px;
+  flex: 1;
+}
+
+.sso-callback-field .form-hint {
+  width: 100%;
+  margin-top: 0;
 }
 
 .sso-actions {

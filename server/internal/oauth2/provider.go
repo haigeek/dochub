@@ -104,10 +104,6 @@ func validateConfig(cfg Config) error {
 			parsed.RawQuery != "" || parsed.ForceQuery {
 			return fmt.Errorf("OAuth2 %s 必须是无凭据、查询串和 fragment 的 HTTP(S) 地址", name)
 		}
-		if name == "redirectUri" && parsed.Path != CallbackPath(cfg.ID) &&
-			!(cfg.ID == "collie" && parsed.Path == "/api/auth/collie/callback") {
-			return fmt.Errorf("OAuth2 redirectUri 路径必须为 %s", CallbackPath(cfg.ID))
-		}
 	}
 	return nil
 }

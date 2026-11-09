@@ -10,6 +10,8 @@ import {
   NFormItem,
   NIcon,
   NInput,
+  NTabPane,
+  NTabs,
 } from 'naive-ui'
 import { useSession } from '@/session'
 import { api } from '@/api'
@@ -19,6 +21,7 @@ const route = useRoute()
 const session = useSession()
 const loading = ref(false)
 const error = ref('')
+const activeTab = ref('password')
 interface OAuthProvider {
   id: string
   name: string
@@ -54,6 +57,9 @@ const returnPath = computed(() => {
 })
 function oauthLoginUrl(provider: OAuthProvider) {
   return `${provider.loginUrl}?${new URLSearchParams({ redirect: returnPath.value })}`
+}
+function providerTabName(provider: OAuthProvider) {
+  return `provider:${provider.id}`
 }
 
 onMounted(async () => {
@@ -108,42 +114,56 @@ async function submit() {
       <NAlert v-if="error || oauthError" type="error" :show-icon="false" class="login-alert">
         {{ error || oauthError }}
       </NAlert>
-      <div v-for="provider in authOptions.providers" :key="provider.id" class="oauth-provider">
-        <NButton tag="a" :href="oauthLoginUrl(provider)" type="primary" size="large" block>
-          使用 {{ provider.name }} 登录
-        </NButton>
-        <p class="login-footnote">
-          {{ provider.loginHint }}
-          <a
-            v-if="provider.portalUrl"
-            :href="provider.portalUrl"
-            target="_blank"
-            rel="noopener noreferrer"
-          >打开 {{ provider.name }} 门户</a>
-        </p>
-      </div>
-      <NForm @submit.prevent="submit">
-        <NFormItem label="用户名">
-          <NInput v-model:value="form.username" placeholder="请输入用户名" size="large">
-            <template #prefix><NIcon :component="PersonOutline" /></template>
-          </NInput>
-        </NFormItem>
-        <NFormItem label="密码">
-          <NInput
-            v-model:value="form.password"
-            type="password"
-            show-password-on="click"
-            placeholder="请输入密码"
-            size="large"
-            @keyup.enter="submit"
-          >
-            <template #prefix><NIcon :component="LockClosedOutline" /></template>
-          </NInput>
-        </NFormItem>
-        <NButton type="primary" size="large" block :loading="loading" attr-type="submit">
-          进入文档中心
-        </NButton>
-      </NForm>
+      <NTabs v-model:value="activeTab" type="line" animated class="login-method-tabs">
+        <NTabPane name="password" tab="账号密码">
+          <NForm @submit.prevent="submit">
+            <NFormItem label="用户名">
+              <NInput v-model:value="form.username" placeholder="请输入用户名" size="large">
+                <template #prefix><NIcon :component="PersonOutline" /></template>
+              </NInput>
+            </NFormItem>
+            <NFormItem label="密码">
+              <NInput
+                v-model:value="form.password"
+                type="password"
+                show-password-on="click"
+                placeholder="请输入密码"
+                size="large"
+                @keyup.enter="submit"
+              >
+                <template #prefix><NIcon :component="LockClosedOutline" /></template>
+              </NInput>
+            </NFormItem>
+            <NButton type="primary" size="large" block :loading="loading" attr-type="submit">
+              进入文档中心
+            </NButton>
+          </NForm>
+        </NTabPane>
+        <NTabPane
+          v-for="provider in authOptions.providers"
+          :key="provider.id"
+          :name="providerTabName(provider)"
+          :tab="`${provider.name} 登录`"
+        >
+          <div class="oauth-provider">
+            <p class="login-method-description">
+              通过 {{ provider.name }} 完成身份认证，然后进入团队的源码文档空间。
+            </p>
+            <NButton tag="a" :href="oauthLoginUrl(provider)" type="primary" size="large" block>
+              使用 {{ provider.name }} 登录
+            </NButton>
+            <p v-if="provider.loginHint || provider.portalUrl" class="login-footnote">
+              {{ provider.loginHint }}
+              <a
+                v-if="provider.portalUrl"
+                :href="provider.portalUrl"
+                target="_blank"
+                rel="noopener noreferrer"
+              >打开 {{ provider.name }} 门户</a>
+            </p>
+          </div>
+        </NTabPane>
+      </NTabs>
       <p class="login-footnote">本地账号由管理员创建；单点登录首次使用时自动创建成员账号。文档访问需获得授权。</p>
     </NCard>
   </main>

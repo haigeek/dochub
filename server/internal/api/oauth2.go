@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"errors"
+	"log"
 	"net/http"
 	"net/url"
 	"path"
@@ -31,10 +32,16 @@ func (s *Server) authOptions(c *gin.Context) {
 		if !settings.Enabled {
 			continue
 		}
-		provider, _, err := s.oauthProvider(c.Request.Context(), settings.ID)
-		if err == nil {
-			options = append(options, provider.Option())
+		// 登录入口只取决于站点是否启用，密钥与认证配置在发起登录时校验。
+		name := settings.ProviderName
+		if name == "" {
+			name = settings.ID
 		}
+		options = append(options, oauth2.Option{
+			ID: settings.ID, Name: name,
+			LoginURL:  "/api/auth/oauth2/" + settings.ID + "/start",
+			PortalURL: settings.PortalURL,
+		})
 	}
 	c.JSON(http.StatusOK, gin.H{"data": gin.H{"providers": options}})
 }
@@ -42,7 +49,12 @@ func (s *Server) authOptions(c *gin.Context) {
 func (s *Server) oauthStart(c *gin.Context) {
 	provider, settings, err := s.oauthProvider(c.Request.Context(), c.Param("provider"))
 	if err != nil {
-		fail(c, http.StatusNotFound, "NOT_FOUND", "登录方式未启用", "")
+		if errors.Is(err, store.ErrNotFound) {
+			fail(c, http.StatusNotFound, "NOT_FOUND", "登录方式未启用", "")
+			return
+		}
+		log.Printf("单点登录站点 %q 初始化失败: %v", c.Param("provider"), err)
+		s.oauthError(c, "unavailable", c.Query("redirect"))
 		return
 	}
 	c.Header("Cache-Control", "no-store")
@@ -139,6 +151,9 @@ func (s *Server) oauthProvider(ctx context.Context, id string) (oauth2.Provider,
 		return nil, store.SSOConfig{}, store.ErrNotFound
 	}
 	ciphertext, err := s.db.SSOClientSecret(ctx, id)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, store.SSOConfig{}, errors.New("已启用站点未配置客户端密钥")
+	}
 	if err != nil {
 		return nil, store.SSOConfig{}, err
 	}

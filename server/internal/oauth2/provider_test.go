@@ -21,6 +21,9 @@ func TestGenericProvider(t *testing.T) {
 						t.Error(err)
 						return
 					}
+					if request.PostForm.Get("redirect_uri") != "https://docs.test/gateway/login/callback" {
+						t.Error("Token 请求未保留自定义回调地址")
+					}
 					if request.PostForm.Get("code_verifier") != "verifier" {
 						t.Error("未传递 PKCE verifier")
 					}
@@ -48,7 +51,7 @@ func TestGenericProvider(t *testing.T) {
 				ID: "company", Name: "企业身份服务", Issuer: "company-identity",
 				AuthorizeURL: upstream.URL + "/authorize", TokenURL: upstream.URL + "/token", UserInfoURL: upstream.URL + "/me",
 				ClientID: "client:id", ClientSecret: "secret+&:", TokenAuthMethod: authMethod,
-				RedirectURI: "https://docs.test/api/auth/oauth2/company/callback",
+				RedirectURI: "https://docs.test/gateway/login/callback",
 				Scopes:      []string{"profile", "email"}, PKCE: true, SubjectField: "data.id", UsernameField: "data.displayName",
 			})
 			if err != nil {
@@ -60,7 +63,8 @@ func TestGenericProvider(t *testing.T) {
 			}
 			parsed, _ := url.Parse(location)
 			sum := sha256.Sum256([]byte("verifier"))
-			if parsed.Query().Get("scope") != "profile email" || parsed.Query().Get("state") != "state" ||
+			if parsed.Query().Get("redirect_uri") != "https://docs.test/gateway/login/callback" ||
+				parsed.Query().Get("scope") != "profile email" || parsed.Query().Get("state") != "state" ||
 				parsed.Query().Get("code_challenge_method") != "S256" ||
 				parsed.Query().Get("code_challenge") != base64.RawURLEncoding.EncodeToString(sum[:]) {
 				t.Fatal("授权参数或 PKCE challenge 错误")
@@ -90,7 +94,7 @@ func TestProviderConfiguration(t *testing.T) {
 		func(cfg *Config) { cfg.AuthorizeURL += "?client_id=other" },
 		func(cfg *Config) { cfg.UserInfoURL += "#fragment" },
 		func(cfg *Config) { cfg.ClientSecret = "" },
-		func(cfg *Config) { cfg.RedirectURI = "https://docs.test/api/auth/oauth2/other/callback" },
+		func(cfg *Config) { cfg.RedirectURI = "javascript:alert(1)" },
 		func(cfg *Config) { cfg.PortalURL = "javascript:alert(1)" },
 		func(cfg *Config) { cfg.TokenAuthMethod = "unsupported" },
 	} {
