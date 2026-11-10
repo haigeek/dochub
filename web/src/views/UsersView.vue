@@ -22,6 +22,11 @@ const message = useMessage()
 const session = useSession()
 const loading = ref(false)
 const creating = ref(false)
+const showUserEditor = ref(false)
+const editingUser = ref<User | null>(null)
+const savingUser = ref(false)
+const deletingUser = ref('')
+const editForm = ref({ username: '', password: '' })
 const updatingRole = ref('')
 const affiliationSaving = ref(false)
 const showAffiliationEditor = ref(false)
@@ -77,6 +82,19 @@ const columns = [
       const nextRole = row.role === 'admin' ? 'member' : 'admin'
       return h(NSpace, { size: 8 }, {
         default: () => [
+          h(NButton, { size: 'small', secondary: true, onClick: () => openUserEditor(row) }, { default: () => '编辑' }),
+          h(NPopconfirm, {
+            positiveText: '删除用户', negativeText: '取消',
+            onPositiveClick: () => deleteUser(row),
+          }, {
+            trigger: () => h(NButton, {
+              size: 'small', type: 'error', secondary: true,
+              disabled: isSelf || deletingUser.value === row.id,
+              loading: deletingUser.value === row.id,
+              title: isSelf ? '不能删除当前登录账号' : undefined,
+            }, { default: () => '删除' }),
+            default: () => `确定删除 ${row.username}？其项目将转交给当前管理员，登录会话、凭证和组织关系将被清理。单点登录用户再次登录会创建新账号。`,
+          }),
           h(
             NButton,
             {
@@ -190,6 +208,49 @@ async function updateUserRole(user: User) {
   }
 }
 
+function openUserEditor(user: User) {
+  editingUser.value = user
+  editForm.value = { username: user.username, password: '' }
+  showUserEditor.value = true
+}
+
+async function saveUser() {
+  if (!editingUser.value) return
+  const { username, password } = editForm.value
+  if (!username.trim() || (password && (password.length < 8 || new TextEncoder().encode(password).length > 72))) {
+    message.warning('用户名必填，新密码须为 8 至 72 字节')
+    return
+  }
+  savingUser.value = true
+  try {
+    await api<User>(`/api/users/${editingUser.value.id}`, {
+      method: 'PUT', body: JSON.stringify({ username: username.trim(), password }),
+    })
+    showUserEditor.value = false
+    editForm.value.password = ''
+    message.success('用户已更新')
+    await loadAll()
+    if (editingUser.value.id === session.user.value?.id) await session.load(true)
+  } catch (reason) {
+    message.error(reason instanceof Error ? reason.message : '编辑用户失败')
+  } finally {
+    savingUser.value = false
+  }
+}
+
+async function deleteUser(user: User) {
+  deletingUser.value = user.id
+  try {
+    await api<void>(`/api/users/${user.id}`, { method: 'DELETE' })
+    message.success('用户已删除，其项目已转交给当前管理员')
+    await loadAll()
+  } catch (reason) {
+    message.error(reason instanceof Error ? reason.message : '删除用户失败')
+  } finally {
+    deletingUser.value = ''
+  }
+}
+
 function openAffiliationEditor(user: User) {
   affiliationUser.value = user
   selectedOrganizationIds.value = organizations.value
@@ -268,6 +329,23 @@ async function saveUserOrganizations() {
         </NSpace>
       </NForm>
     </div>
+
+    <NModal v-model:show="showUserEditor" :mask-closable="!savingUser" :close-on-esc="!savingUser">
+      <NCard class="modal-card access-card" title="编辑用户" :bordered="false">
+        <NForm label-placement="top">
+          <NFormItem label="用户名">
+            <NInput v-model:value="editForm.username" placeholder="请输入用户名" />
+          </NFormItem>
+          <NFormItem label="新密码（留空保持不变）">
+            <NInput v-model:value="editForm.password" type="password" show-password-on="click" placeholder="8 至 72 字节，保存后撤销该用户的其他登录会话" />
+          </NFormItem>
+        </NForm>
+        <NSpace justify="end">
+          <NButton :disabled="savingUser" @click="showUserEditor = false">取消</NButton>
+          <NButton type="primary" :loading="savingUser" @click="saveUser">保存</NButton>
+        </NSpace>
+      </NCard>
+    </NModal>
 
     <NModal
       :show="showAffiliationEditor"

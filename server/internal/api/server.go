@@ -102,6 +102,8 @@ func (s *Server) Router() *gin.Engine {
 	protected.GET("/users", s.listUsers)
 	protected.POST("/users", s.createUser)
 	protected.PATCH("/users/:id/role", s.updateUserRole)
+	protected.PUT("/users/:id", s.updateUser)
+	protected.DELETE("/users/:id", s.deleteUser)
 	protected.GET("/organizations/directory", s.organizationDirectory)
 	protected.GET("/admin/organizations", s.listOrganizations)
 	protected.POST("/admin/organizations", s.createOrganization)
