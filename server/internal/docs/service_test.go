@@ -148,6 +148,34 @@ func TestIndexDocumentsKeepsRepositoryPaths(t *testing.T) {
 	}
 }
 
+func TestCopyDocumentRootsSkipsMissingDirectories(t *testing.T) {
+	worktree := t.TempDir()
+	document := filepath.Join(worktree, "docs", "start.md")
+	if err := os.MkdirAll(filepath.Dir(document), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(document, []byte("# 开始\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot := t.TempDir()
+	available, err := copyDocumentRoots(
+		worktree, snapshot, []string{"docs", "dev-docs"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(available) != 1 || available[0] != "docs" {
+		t.Fatalf("缺失目录应被跳过，可用目录应保留: %#v", available)
+	}
+	if _, err := os.Stat(filepath.Join(snapshot, "docs", "start.md")); err != nil {
+		t.Fatalf("存在的文档目录未复制: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(snapshot, "dev-docs")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("缺失的文档目录不应创建: %v", err)
+	}
+}
+
 func TestIndexDocumentsSupportsHTML(t *testing.T) {
 	root := t.TempDir()
 	source := `<!doctype html>

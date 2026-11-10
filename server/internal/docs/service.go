@@ -122,25 +122,14 @@ func (s *Service) SyncBranch(ctx context.Context, projectID, branch string) erro
 
 	snapshotID := fmt.Sprintf("%d-%s", time.Now().UnixNano(), shortHash(repo.commit))
 	tempSnapshot := filepath.Join(s.cfg.StorageDir, "tmp", project.ID+"-"+shortHash(branch)+"-"+snapshotID)
-	for _, docRoot := range docRoots {
-		sourceRoot := filepath.Join(repo.worktree, filepath.FromSlash(docRoot))
-		info, err := os.Stat(sourceRoot)
-		if err != nil {
-			os.RemoveAll(tempSnapshot)
-			if errors.Is(err, os.ErrNotExist) {
-				return fmt.Errorf("分支 %s 中不存在文档目录 %s", branch, docRoot)
-			}
-			return fmt.Errorf("读取文档目录 %s 失败: %w", docRoot, err)
-		}
-		if !info.IsDir() {
-			os.RemoveAll(tempSnapshot)
-			return fmt.Errorf("文档路径 %s 不是目录", docRoot)
-		}
-		targetRoot := filepath.Join(tempSnapshot, filepath.FromSlash(docRoot))
-		if err := copyTree(sourceRoot, targetRoot); err != nil {
-			os.RemoveAll(tempSnapshot)
-			return fmt.Errorf("复制文档目录 %s 失败: %w", docRoot, err)
-		}
+	availableRoots, err := copyDocumentRoots(repo.worktree, tempSnapshot, docRoots)
+	if err != nil {
+		os.RemoveAll(tempSnapshot)
+		return err
+	}
+	if len(availableRoots) == 0 {
+		os.RemoveAll(tempSnapshot)
+		return fmt.Errorf("分支 %s 中不存在文档目录 %s", branch, strings.Join(docRoots, "、"))
 	}
 	documents, err := indexDocuments(tempSnapshot)
 	if err != nil {
@@ -149,7 +138,7 @@ func (s *Service) SyncBranch(ctx context.Context, projectID, branch string) erro
 	}
 	if len(documents) == 0 {
 		os.RemoveAll(tempSnapshot)
-		return fmt.Errorf("文档目录 %s 中没有 Markdown 或 HTML 文件", strings.Join(docRoots, "、"))
+		return fmt.Errorf("文档目录 %s 中没有 Markdown 或 HTML 文件", strings.Join(availableRoots, "、"))
 	}
 
 	finalSnapshot := filepath.Join(
@@ -526,6 +515,30 @@ func expandCSSAssets(root string, assets []string) []string {
 		}
 	}
 	return result
+}
+
+func copyDocumentRoots(worktree, snapshotRoot string, docRoots []string) ([]string, error) {
+	availableRoots := make([]string, 0, len(docRoots))
+	for _, docRoot := range docRoots {
+		sourceRoot := filepath.Join(worktree, filepath.FromSlash(docRoot))
+		info, err := os.Stat(sourceRoot)
+		if errors.Is(err, os.ErrNotExist) {
+			// 项目级目录配置会作用于所有分支，当前分支缺失的目录直接跳过。
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("读取文档目录 %s 失败: %w", docRoot, err)
+		}
+		if !info.IsDir() {
+			return nil, fmt.Errorf("文档路径 %s 不是目录", docRoot)
+		}
+		targetRoot := filepath.Join(snapshotRoot, filepath.FromSlash(docRoot))
+		if err := copyTree(sourceRoot, targetRoot); err != nil {
+			return nil, fmt.Errorf("复制文档目录 %s 失败: %w", docRoot, err)
+		}
+		availableRoots = append(availableRoots, docRoot)
+	}
+	return availableRoots, nil
 }
 
 func copyTree(source, target string) error {
