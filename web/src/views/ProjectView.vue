@@ -214,11 +214,8 @@ async function loadTreeAndDocument(branch: string, preferredPath?: string) {
     preferredPath && documents.value.some((item) => item.path === preferredPath)
       ? preferredPath
       : defaultDocumentPath(documents.value)
-  // 所有配置的文档根目录默认展开，便于直接看到 Markdown 文件。
-  expandedKeys.value = [
-    ...docRoots.value.map((root) => `dir:${root}`),
-    ...documentFolders(documents.value),
-  ]
+  // 目录树默认收起，只展示顶层目录，由用户按需展开。
+  expandedKeys.value = []
   if (!desiredPath) {
     document.value = null
     headings.value = []
@@ -238,6 +235,9 @@ async function loadDocument(docPath: string, branch = branchName.value) {
     document.value = await api<DocumentContent>(
       `/api/projects/${project.value.id}/doc?branch=${encodeURIComponent(branch)}&path=${encodeURIComponent(docPath)}`,
     )
+    expandedKeys.value = [
+      ...new Set([...expandedKeys.value, ...documentFolderKeys(docPath)]),
+    ]
   } catch (reason) {
     document.value = null
     message.error(reason instanceof Error ? reason.message : '加载文档失败')
@@ -547,18 +547,15 @@ function buildSidebarTree(items: DocumentItem[], prefix = ''): SidebarTreeNode[]
   ]
 }
 
-function documentFolders(items: DocumentItem[]) {
-  const values = new Set<string>()
-  for (const item of items) {
-    const parts = item.path.split('/')
-    parts.pop()
-    let current = ''
-    for (const part of parts) {
-      current = current ? `${current}/${part}` : part
-      values.add(`dir:${current}`)
-    }
+function documentFolderKeys(docPath: string): string[] {
+  const parts = docPath.split('/')
+  parts.pop()
+  const keys = parts.map((_, index) => `dir:${parts.slice(0, index + 1).join('/')}`)
+  if (docRoots.value.length === 1) {
+    const rootKey = `dir:${docRoots.value[0]}`
+    if (!keys.includes(rootKey)) keys.unshift(rootKey)
   }
-  return [...values]
+  return keys
 }
 
 function branchStatusLabel(branch: Branch | null): '已同步' | '同步中' | '同步失败' | '待同步' {
