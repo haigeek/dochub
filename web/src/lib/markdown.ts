@@ -129,7 +129,8 @@ function isMarkdown(value: string): boolean {
 }
 
 function resolveRelative(docPath: string, target: string): string {
-  const cleanTarget = target.split('#')[0].split('?')[0]
+  // markdown-it 会把链接编码成 URL 形式，相对路径需先还原为仓库中的真实路径。
+  const cleanTarget = decodePath(target.split(/[?#]/, 1)[0])
   const segments = docPath.split('/')
   segments.pop()
   for (const part of cleanTarget.split('/')) {
@@ -138,6 +139,14 @@ function resolveRelative(docPath: string, target: string): string {
     else segments.push(part)
   }
   return segments.join('/')
+}
+
+function decodePath(value: string): string {
+  try {
+    return decodeURI(value)
+  } catch {
+    return value
+  }
 }
 
 function escapeHtml(value: string): string {
