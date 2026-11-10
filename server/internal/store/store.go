@@ -102,6 +102,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 			ON oauth_login_transactions (expires_at)`,
 		`CREATE TABLE IF NOT EXISTS sso_settings (
 			id TEXT PRIMARY KEY,
+			auth_key TEXT NOT NULL DEFAULT '',
 			enabled BOOLEAN NOT NULL DEFAULT FALSE,
 			provider_type TEXT NOT NULL DEFAULT 'generic',
 			provider_name TEXT NOT NULL DEFAULT '统一身份认证',
@@ -123,6 +124,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		)`,
 		`ALTER TABLE sso_settings ADD COLUMN IF NOT EXISTS provider_id TEXT`,
+		`ALTER TABLE sso_settings ADD COLUMN IF NOT EXISTS auth_key TEXT NOT NULL DEFAULT ''`,
 		// 升级时保留原身份命名空间和回调，将旧基础地址展开为三个标准端点。
 		`UPDATE sso_settings SET
 			provider_id = CASE WHEN provider_type = 'collie' THEN 'collie' ELSE 'sso' END
@@ -147,6 +149,9 @@ func (s *Store) Migrate(ctx context.Context) error {
 			AND NOT EXISTS (SELECT 1 FROM sso_settings existing WHERE existing.id = sso_settings.provider_id)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS sso_settings_provider_id_unique_idx
 			ON sso_settings (provider_id)`,
+		`UPDATE sso_settings SET auth_key = provider_id WHERE auth_key = ''`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS sso_settings_auth_key_unique_idx
+			ON sso_settings (auth_key)`,
 		`CREATE TABLE IF NOT EXISTS projects (
 			id TEXT PRIMARY KEY,
 			slug TEXT,

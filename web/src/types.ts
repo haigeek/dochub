@@ -112,6 +112,7 @@ export interface Heading {
 
 export interface SSOConfig {
   id: string
+  authKey: string
   enabled: boolean
   providerName: string
   endpointBaseUrl: string

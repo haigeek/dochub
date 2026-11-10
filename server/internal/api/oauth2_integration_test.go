@@ -472,7 +472,7 @@ func TestSSOAdminConfiguration(t *testing.T) {
 		SubjectField: "sub", UsernameField: "name", Scopes: []string{},
 	}
 	body, _ := json.Marshal(gin.H{"clientSecret": "super-secret", "enabled": settings.Enabled,
-		"providerName": settings.ProviderName, "endpointBaseUrl": settings.EndpointBaseURL,
+		"authKey": "collie", "providerName": settings.ProviderName, "endpointBaseUrl": settings.EndpointBaseURL,
 		"authorizePath": "/collie/oauth2/authorize", "tokenPath": "/collie/oauth2/token",
 		"userInfoPath": "/collie/oauth2/userinfo", "clientId": settings.ClientID,
 		"redirectUri": settings.RedirectURI, "portalUrl": settings.PortalURL,
@@ -489,7 +489,8 @@ func TestSSOAdminConfiguration(t *testing.T) {
 	responseBody := response.Body.String()
 	if err := json.Unmarshal([]byte(responseBody), &saved); err != nil ||
 		response.Code != http.StatusOK || !saved.Data.HasClientSecret || saved.Data.ID == "" ||
-		saved.Data.CallbackPath != oauth2.CallbackPath(saved.Data.ID) ||
+		saved.Data.AuthKey != "collie" ||
+		saved.Data.CallbackPath != oauth2.CallbackPath("collie") ||
 		strings.Contains(response.Body.String(), "super-secret") {
 		t.Fatalf("保存配置失败或密钥泄漏: %d %s", response.Code, responseBody)
 	}
@@ -513,7 +514,8 @@ func TestSSOAdminConfiguration(t *testing.T) {
 	}
 
 	secondBody, _ := json.Marshal(gin.H{
-		"clientSecret": "second-secret", "enabled": true, "providerName": "第二身份站点",
+		"clientSecret": "second-secret", "enabled": true, "authKey": "second",
+		"providerName": "第二身份站点",
 		"endpointBaseUrl": "http://127.0.0.1:2", "authorizePath": "/authorize",
 		"tokenPath": "/token", "userInfoPath": "/me", "clientId": "second-client",
 		"redirectUri":     "https://public-docs.test/gateway/oauth/callback",
@@ -533,12 +535,27 @@ func TestSSOAdminConfiguration(t *testing.T) {
 		second.Code != http.StatusOK || secondSaved.Data.ID == saved.Data.ID {
 		t.Fatalf("新增第二个站点失败: %d %s", second.Code, secondResponseBody)
 	}
+	duplicateBody, _ := json.Marshal(gin.H{
+		"clientSecret": "duplicate-secret", "enabled": true, "authKey": secondSaved.Data.AuthKey,
+		"providerName": "重复认证标识", "endpointBaseUrl": "http://127.0.0.1:3",
+		"authorizePath": "/authorize", "tokenPath": "/token", "userInfoPath": "/me",
+		"clientId": "duplicate-client", "tokenAuthMethod": "client_secret_post",
+	})
+	duplicate := httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodPost, "/api/admin/sso", bytes.NewReader(duplicateBody))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-CSRF-Token", adminCSRF)
+	request.AddCookie(adminCookie)
+	router.ServeHTTP(duplicate, request)
+	if duplicate.Code != http.StatusConflict {
+		t.Fatalf("重复认证标识应被拒绝: %d %s", duplicate.Code, duplicate.Body.String())
+	}
 	if secondSaved.Data.RedirectURI != "https://public-docs.test/gateway/oauth/callback" {
 		t.Fatalf("保存后应保留自定义回调地址: %s", secondResponseBody)
 	}
 	secondStart := httptest.NewRecorder()
 	router.ServeHTTP(secondStart, httptest.NewRequest(
-		http.MethodGet, "/api/auth/oauth2/"+secondSaved.Data.ID+"/start", nil,
+		http.MethodGet, "/api/auth/oauth2/"+secondSaved.Data.AuthKey+"/start", nil,
 	))
 	secondLocation, err := url.Parse(secondStart.Header().Get("Location"))
 	if err != nil || secondStart.Code != http.StatusFound ||
@@ -593,15 +610,23 @@ func TestSSOAdminConfiguration(t *testing.T) {
 
 	options := httptest.NewRecorder()
 	router.ServeHTTP(options, httptest.NewRequest(http.MethodGet, "/api/auth/options", nil))
-	if options.Code != http.StatusOK || !strings.Contains(options.Body.String(), `"id":"`+saved.Data.ID+`"`) ||
-		!strings.Contains(options.Body.String(), `"id":"`+secondSaved.Data.ID+`"`) ||
+	if options.Code != http.StatusOK || !strings.Contains(options.Body.String(), `"id":"collie"`) ||
+		!strings.Contains(options.Body.String(), `"id":"second"`) ||
+		strings.Contains(options.Body.String(), `"id":"`+saved.Data.ID+`"`) ||
 		strings.Contains(options.Body.String(), "super-secret") {
 		t.Fatalf("启用的登录入口未公开: %s", options.Body.String())
 	}
 	start := httptest.NewRecorder()
-	router.ServeHTTP(start, httptest.NewRequest(http.MethodGet, "/api/auth/oauth2/"+saved.Data.ID+"/start", nil))
+	router.ServeHTTP(start, httptest.NewRequest(http.MethodGet, "/api/auth/oauth2/"+saved.Data.AuthKey+"/start", nil))
 	if start.Code != http.StatusFound || !strings.Contains(start.Header().Get("Location"), "127.0.0.1:1") {
 		t.Fatalf("系统配置未驱动授权跳转: %d %s", start.Code, start.Header().Get("Location"))
+	}
+	oldIDStart := httptest.NewRecorder()
+	router.ServeHTTP(oldIDStart, httptest.NewRequest(
+		http.MethodGet, "/api/auth/oauth2/"+saved.Data.ID+"/start", nil,
+	))
+	if oldIDStart.Code != http.StatusNotFound {
+		t.Fatalf("内部 ID 不应继续作为认证入口: %d", oldIDStart.Code)
 	}
 
 	memberCookie, _ := loginForTest(t, router, "sso-member", "member-password")
@@ -625,8 +650,8 @@ func TestSSOAdminConfiguration(t *testing.T) {
 	}
 
 	offBody, _ := json.Marshal(gin.H{
-		"enabled": false, "providerName": "统一身份认证",
-		"clientId": "", "redirectUri": "https://docs.test" + oauth2.CallbackPath(saved.Data.ID),
+		"enabled": false, "authKey": saved.Data.AuthKey, "providerName": "统一身份认证",
+		"clientId": "", "redirectUri": "https://docs.test" + oauth2.CallbackPath(saved.Data.AuthKey),
 		"clearClientSecret": true,
 	})
 	off := httptest.NewRecorder()
@@ -678,7 +703,7 @@ func TestSSOEndpointMigration(t *testing.T) {
 		}
 	}
 	settings, err := db.SSOConfig(ctx, "collie")
-	if err != nil || settings.ProviderID() != "collie" ||
+	if err != nil || settings.ProviderID() != "collie" || settings.AuthKey != "collie" ||
 		settings.AuthorizeURL != "https://identity.test/collie/oauth2/authorize" ||
 		settings.TokenURL != "https://identity.test/collie/oauth2/token" ||
 		settings.UserInfoURL != "https://identity.test/collie/oauth2/userinfo" ||

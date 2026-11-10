@@ -26,8 +26,8 @@ type Client struct {
 
 func (client *Client) Option() Option {
 	return Option{
-		ID: client.cfg.ID, Name: client.cfg.Name,
-		LoginURL:  "/api/auth/oauth2/" + client.cfg.ID + "/start",
+		ID: client.cfg.AuthKey, Name: client.cfg.Name,
+		LoginURL:  "/api/auth/oauth2/" + client.cfg.AuthKey + "/start",
 		PortalURL: client.cfg.PortalURL, LoginHint: client.adapter.LoginHint(),
 	}
 }

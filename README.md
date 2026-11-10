@@ -238,8 +238,8 @@ DocHub 使用统一的 OAuth2 授权码登录接入身份服务，与本地账�
 管理员登录后点击页头的设置图标进入“管理后台 > 系统设置”，可查看已配置站点列表并新增、编辑或删除站点；
 配置保存在系统数据库，修改后立即生效，无须重启服务。配置接口仅管理员可访问。
 
-公共入口由系统配置动态生成：`GET /api/auth/oauth2/:provider/start` 和
-`GET /api/auth/oauth2/:provider/callback`，`GET /api/auth/options` 只返回公开的入口名称、地址和提示。
+公共入口由系统配置动态生成：`GET /api/auth/oauth2/:authKey/start` 和
+`GET /api/auth/oauth2/:authKey/callback`，`GET /api/auth/options` 只返回公开的入口名称、地址和提示。
 所有端点必须为无查询串、fragment 和用户凭据的 HTTP(S) 绝对地址；生产环境使用 HTTPS，
 HTTP 只适合可信内网的过渡环境。
 
@@ -268,13 +268,15 @@ ls -l ./data/.dochub-config-key
 
 ### 配置方式
 
-在配置页填写显示名称、客户端 ID、客户端密钥、端点基础地址，以及授权、Token 和用户信息三个 path。
+在配置页填写认证标识、显示名称、客户端 ID、客户端密钥、端点基础地址，以及授权、Token 和用户信息三个 path。
 三个 path 必须以 `/` 开头，系统将其追加到基础地址；基础地址可以包含网关前缀，
 例如 `https://identity.example.com/gateway` 加 `/oauth/token` 得到
 `https://identity.example.com/gateway/oauth/token`。path 不允许填写完整 URL、查询串、fragment 或上级目录。
-所有身份服务使用相同表单，不按厂商区分类型。每个站点由系统分配稳定 ID，
-标准回调路径为 `/api/auth/oauth2/<站点 ID>/callback`，配置页自动填充完整地址并支持手动编辑。
-新建站点保存后会将默认占位路径替换为实际站点 ID；自定义外部路径会保持原样，需要反向代理转发至标准回调接口。
+所有身份服务使用相同表单，不按厂商区分类型。每个站点同时具有内部稳定 ID 和对外认证标识：
+内部 ID 用于保留账号绑定，认证标识用于生成 `/api/auth/oauth2/<认证标识>/start` 和
+`/api/auth/oauth2/<认证标识>/callback`。认证标识仅允许小写字母、数字和连字符，例如 `collie`。
+修改认证标识不会改变已有账号绑定，但需要同步更新身份服务登记的回调地址。
+标准回调路径会随认证标识自动更新；自定义外部路径保持原样，需要反向代理转发至标准回调接口。
 点击“自动填充”可恢复基于当前访问地址生成的默认值；
 需要在对应身份服务端精确登记该完整地址。
 
@@ -287,7 +289,7 @@ ls -l ./data/.dochub-config-key
 
 ### 接入示例
 
-Collie 的端点基础地址填 `https://<Collie 域名>`，授权 path 填 `/collie/oauth2/authorize`，
+Collie 的认证标识填 `collie`，端点基础地址填 `https://<Collie 域名>`，授权 path 填 `/collie/oauth2/authorize`，
 Token path 填 `/collie/oauth2/token`，用户信息 path 填 `/collie/oauth2/userinfo`。
 客户端 ID 使用 App.id；高级选项中的用户 ID 字段填 `sub`，用户名字段填 `userName`，
 PKCE 保持关闭。将配置页显示的完整回调地址登记到 App 的 `redirectUris`，
@@ -298,7 +300,8 @@ PKCE 保持关闭。将配置页显示的完整回调地址登记到 App 的 `re
 未登录时 Collie 直接显示 401 `login_required`，不会回调 DocHub，此时登录门户后返回重新发起授权。
 DocHub 不会自动循环重试。
 
-原有 `/api/auth/collie/start`、`/api/auth/collie/callback` 地址仍保留兼容入口。
+认证标识设为 `collie` 后，登录入口和回调地址分别为 `/api/auth/oauth2/collie/start`、
+`/api/auth/oauth2/collie/callback`。原有 `/api/auth/collie/start`、`/api/auth/collie/callback` 仍保留兼容入口。
 旧版单站点配置会自动进入站点列表，同源完整端点地址会拆分为基础地址和三个 path，
 并保留原回调地址、身份命名空间和账号绑定。删除站点会停止新登录，已有账号和授权不会删除。
 
@@ -319,7 +322,7 @@ Access Token 只用于当次用户信息请求，不下发前端也不持久化�
 退出只清理 DocHub 会话，来源退出或应用禁用不立即撤销本地会话；当前没有统一单点退出。
 移除某个服务配置仅停止新授权，已有本地会话继续有效。
 
-本地前后端分离开发时使用前端同源的回调地址，例如 `http://127.0.0.1:5173/api/auth/oauth2/<站点 ID>/callback`，
+本地前后端分离开发时使用前端同源的回调地址，例如 `http://127.0.0.1:5173/api/auth/oauth2/<认证标识>/callback`，
 由 Vite `/api` 代理接收，避免登录事务 Cookie 或登录会话 Cookie 跨域。
 应用不记录 OAuth2 回调访问日志；反向代理和错误监控也应禁止记录这些回调的查询串，
 并禁止采集 Token 请求正文和 Authorization 请求头。

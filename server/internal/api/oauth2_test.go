@@ -36,6 +36,18 @@ func TestNormalizeSSORedirectURI(t *testing.T) {
 	}
 }
 
+func TestReplaceStandardAuthCallback(t *testing.T) {
+	if got := replaceStandardAuthCallback(
+		"https://docs.test/api/auth/oauth2/old/callback", "collie",
+	); got != "https://docs.test/api/auth/oauth2/collie/callback" {
+		t.Fatalf("标准回调路径未随认证标识更新: %s", got)
+	}
+	custom := "https://docs.test/gateway/oauth/callback"
+	if got := replaceStandardAuthCallback(custom, "collie"); got != custom {
+		t.Fatalf("自定义回调路径不应被修改: %s", got)
+	}
+}
+
 func TestSafeReturnPath(t *testing.T) {
 	for _, raw := range []string{
 		"", "https://evil.test", "//evil.test", "/\\evil.test", "/%2fevil.test",

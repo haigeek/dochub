@@ -24,7 +24,7 @@ type ssoProviderView struct {
 }
 
 func newSSOProviderView(settings store.SSOConfig) ssoProviderView {
-	return ssoProviderView{SSOConfig: settings, CallbackPath: oauth2.CallbackPath(settings.ProviderID())}
+	return ssoProviderView{SSOConfig: settings, CallbackPath: oauth2.CallbackPath(settings.AuthKey)}
 }
 
 func (s *Server) listSSOSettings(c *gin.Context) {
@@ -104,6 +104,14 @@ func bindSSOSettings(c *gin.Context, id string) (store.SSOConfig, ssoSettingsInp
 	}
 	settings := normalizeSSOSettings(input.SSOConfig)
 	settings.ID = id
+	if err := oauth2.ValidateAuthKey(settings.AuthKey); err != nil {
+		fail(c, http.StatusBadRequest, "INVALID_SSO_CONFIG", err.Error(), "")
+		return store.SSOConfig{}, input, false
+	}
+	if settings.AuthKey == "pending" {
+		fail(c, http.StatusBadRequest, "INVALID_SSO_CONFIG", "认证标识不能使用 pending", "")
+		return store.SSOConfig{}, input, false
+	}
 	if err := settings.ResolveEndpoints(); err != nil {
 		fail(c, http.StatusBadRequest, "INVALID_SSO_CONFIG", err.Error(), "")
 		return store.SSOConfig{}, input, false
@@ -112,13 +120,7 @@ func bindSSOSettings(c *gin.Context, id string) (store.SSOConfig, ssoSettingsInp
 }
 
 func (s *Server) saveSSOSettings(c *gin.Context, settings store.SSOConfig, input ssoSettingsInput, create bool) {
-	redirectURI, err := normalizeSSORedirectURI(settings.RedirectURI, settings.ID)
-	if err != nil {
-		fail(c, http.StatusBadRequest, "INVALID_SSO_CONFIG", err.Error(), "")
-		return
-	}
-	settings.RedirectURI = redirectURI
-	_, lookupErr := s.db.SSOConfig(c, settings.ID)
+	existing, lookupErr := s.db.SSOConfig(c, settings.ID)
 	if create && lookupErr == nil {
 		fail(c, http.StatusConflict, "SSO_EXISTS", "单点登录站点已存在", "")
 		return
@@ -131,6 +133,25 @@ func (s *Server) saveSSOSettings(c *gin.Context, settings store.SSOConfig, input
 		internal(c, lookupErr)
 		return
 	}
+	authKeyOwner, authKeyErr := s.db.SSOConfigByAuthKey(c, settings.AuthKey)
+	if authKeyErr == nil && authKeyOwner.ID != settings.ID {
+		fail(c, http.StatusConflict, "SSO_AUTH_KEY_EXISTS", "认证标识已被其他站点使用", "")
+		return
+	}
+	if authKeyErr != nil && !errors.Is(authKeyErr, store.ErrNotFound) {
+		internal(c, authKeyErr)
+		return
+	}
+	redirectSource := settings.RedirectURI
+	if !create && existing.AuthKey != settings.AuthKey {
+		redirectSource = replaceStandardAuthCallback(redirectSource, settings.AuthKey)
+	}
+	redirectURI, err := normalizeSSORedirectURI(redirectSource, settings.AuthKey)
+	if err != nil {
+		fail(c, http.StatusBadRequest, "INVALID_SSO_CONFIG", err.Error(), "")
+		return
+	}
+	settings.RedirectURI = redirectURI
 	if input.ClientSecret != "" && len(input.ClientSecret) > 4096 {
 		fail(c, http.StatusBadRequest, "INVALID_SSO_CONFIG", "客户端密钥长度不能超过 4096", "")
 		return
@@ -188,6 +209,7 @@ func normalizeSSOSettings(settings store.SSOConfig) store.SSOConfig {
 	if settings.ProviderName == "" {
 		settings.ProviderName = "统一身份认证"
 	}
+	settings.AuthKey = strings.TrimSpace(settings.AuthKey)
 	settings.ProviderName = strings.TrimSpace(settings.ProviderName)
 	settings.EndpointBaseURL = strings.TrimRight(strings.TrimSpace(settings.EndpointBaseURL), "/")
 	settings.AuthorizePath = strings.TrimSpace(settings.AuthorizePath)
@@ -232,6 +254,20 @@ func normalizeSSORedirectURI(raw, id string) (string, error) {
 		return "", errors.New("回调地址指向其他站点，请使用当前站点路径 " + oauth2.CallbackPath(id))
 	}
 	return parsed.String(), nil
+}
+
+func replaceStandardAuthCallback(raw, authKey string) string {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+	if strings.HasPrefix(parsed.Path, "/api/auth/oauth2/") &&
+		strings.HasSuffix(parsed.Path, "/callback") {
+		parsed.Path = oauth2.CallbackPath(authKey)
+		parsed.RawPath = ""
+		return parsed.String()
+	}
+	return raw
 }
 
 func uniqueNonBlank(values []string) []string {

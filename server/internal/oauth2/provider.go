@@ -11,6 +11,7 @@ import (
 
 type Config struct {
 	ID              string   `json:"id"`
+	AuthKey         string   `json:"authKey"`
 	Name            string   `json:"name"`
 	AuthorizeURL    string   `json:"authorizeUrl"`
 	TokenURL        string   `json:"tokenUrl"`
@@ -59,13 +60,16 @@ type Failure string
 
 func (failure Failure) Error() string { return string(failure) }
 
-func CallbackPath(id string) string { return "/api/auth/oauth2/" + id + "/callback" }
+func CallbackPath(authKey string) string { return "/api/auth/oauth2/" + authKey + "/callback" }
 
 func NewProvider(cfg Config) (Provider, error) {
 	return newGenericProvider(cfg)
 }
 
 func NewClient(cfg Config, adapter Adapter) (*Client, error) {
+	if cfg.AuthKey == "" {
+		cfg.AuthKey = cfg.ID
+	}
 	if cfg.Name == "" {
 		cfg.Name = cfg.ID
 	}
@@ -84,6 +88,9 @@ func NewClient(cfg Config, adapter Adapter) (*Client, error) {
 func validateConfig(cfg Config) error {
 	if !regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`).MatchString(cfg.ID) {
 		return fmt.Errorf("OAuth2 Provider id 必须为小写字母开头的字母、数字或连字符，最多 32 位")
+	}
+	if err := ValidateAuthKey(cfg.AuthKey); err != nil {
+		return err
 	}
 	if strings.TrimSpace(cfg.ClientID) == "" || strings.TrimSpace(cfg.ClientSecret) == "" {
 		return fmt.Errorf("OAuth2 Provider 必须配置 clientId 和 clientSecret")
@@ -104,6 +111,13 @@ func validateConfig(cfg Config) error {
 			parsed.RawQuery != "" || parsed.ForceQuery {
 			return fmt.Errorf("OAuth2 %s 必须是无凭据、查询串和 fragment 的 HTTP(S) 地址", name)
 		}
+	}
+	return nil
+}
+
+func ValidateAuthKey(authKey string) error {
+	if !regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`).MatchString(authKey) {
+		return fmt.Errorf("OAuth2 认证标识必须为小写字母开头的字母、数字或连字符，最多 32 位")
 	}
 	return nil
 }

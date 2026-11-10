@@ -12,6 +12,7 @@ import (
 
 type SSOConfig struct {
 	ID                     string     `json:"id"`
+	AuthKey                string     `json:"authKey"`
 	Enabled                bool       `json:"enabled"`
 	ProviderName           string     `json:"providerName"`
 	EndpointBaseURL        string     `json:"endpointBaseUrl"`
@@ -72,6 +73,14 @@ func (s *Store) SSOConfig(ctx context.Context, id string) (SSOConfig, error) {
 	return config, err
 }
 
+func (s *Store) SSOConfigByAuthKey(ctx context.Context, authKey string) (SSOConfig, error) {
+	config, err := scanSSOConfig(s.DB.QueryRow(ctx, ssoConfigSelect+` WHERE auth_key = $1`, authKey))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return SSOConfig{}, ErrNotFound
+	}
+	return config, err
+}
+
 func (s *Store) SaveSSOConfig(ctx context.Context, config SSOConfig, clientSecretCiphertext, updatedBy string) error {
 	if err := config.ResolveEndpoints(); err != nil {
 		return err
@@ -84,16 +93,21 @@ func (s *Store) SaveSSOConfig(ctx context.Context, config SSOConfig, clientSecre
 	if config.ID == "" {
 		return errors.New("单点登录站点 ID 不能为空")
 	}
+	config.AuthKey = strings.TrimSpace(config.AuthKey)
+	if config.AuthKey == "" {
+		config.AuthKey = config.ID
+	}
 	_, err = s.DB.Exec(ctx, `
 		INSERT INTO sso_settings (
-			id, provider_id, enabled, provider_type, provider_name, endpoint_base_url,
+			id, auth_key, provider_id, enabled, provider_type, provider_name, endpoint_base_url,
 			authorize_path, token_path, user_info_path, authorize_url, token_url,
 			user_info_url, client_id, client_secret_ciphertext, redirect_uri, portal_url,
 			issuer, scopes, token_auth_method, pkce, subject_field, username_field,
 			updated_by, updated_at
-		) VALUES ($1, $1, $2, 'generic', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
-			$13, $14, $15, $16, $17, $18, $19, $20, NULLIF($21, ''), NOW())
+		) VALUES ($1, $2, $1, $3, 'generic', $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+			$14, $15, $16, $17, $18, $19, $20, $21, NULLIF($22, ''), NOW())
 		ON CONFLICT (id) DO UPDATE SET
+			auth_key = EXCLUDED.auth_key,
 			provider_id = EXCLUDED.provider_id,
 			enabled = EXCLUDED.enabled,
 			provider_name = EXCLUDED.provider_name,
@@ -116,7 +130,7 @@ func (s *Store) SaveSSOConfig(ctx context.Context, config SSOConfig, clientSecre
 			username_field = EXCLUDED.username_field,
 			updated_by = EXCLUDED.updated_by,
 			updated_at = NOW()`,
-		config.ID, config.Enabled, config.ProviderName, config.EndpointBaseURL,
+		config.ID, config.AuthKey, config.Enabled, config.ProviderName, config.EndpointBaseURL,
 		config.AuthorizePath, config.TokenPath, config.UserInfoPath,
 		config.AuthorizeURL, config.TokenURL, config.UserInfoURL, config.ClientID,
 		clientSecretCiphertext, config.RedirectURI, config.PortalURL, config.Issuer,
@@ -147,7 +161,7 @@ func (s *Store) SSOClientSecret(ctx context.Context, id string) (string, error) 
 }
 
 const ssoConfigSelect = `
-	SELECT id, enabled, provider_name, endpoint_base_url, authorize_path, token_path,
+	SELECT id, auth_key, enabled, provider_name, endpoint_base_url, authorize_path, token_path,
 		user_info_path, authorize_url, token_url, user_info_url, client_id,
 		client_secret_ciphertext, redirect_uri, portal_url, issuer, scopes,
 		token_auth_method, pkce, subject_field, username_field,
@@ -162,7 +176,7 @@ func scanSSOConfig(row rowScanner) (SSOConfig, error) {
 	config := DefaultSSOConfig()
 	var scopes []byte
 	err := row.Scan(
-		&config.ID, &config.Enabled, &config.ProviderName, &config.EndpointBaseURL,
+		&config.ID, &config.AuthKey, &config.Enabled, &config.ProviderName, &config.EndpointBaseURL,
 		&config.AuthorizePath, &config.TokenPath, &config.UserInfoPath,
 		&config.AuthorizeURL, &config.TokenURL, &config.UserInfoURL, &config.ClientID,
 		&config.ClientSecretCiphertext, &config.RedirectURI, &config.PortalURL,

@@ -35,11 +35,11 @@ func (s *Server) authOptions(c *gin.Context) {
 		// 登录入口只取决于站点是否启用，密钥与认证配置在发起登录时校验。
 		name := settings.ProviderName
 		if name == "" {
-			name = settings.ID
+			name = settings.AuthKey
 		}
 		options = append(options, oauth2.Option{
-			ID: settings.ID, Name: name,
-			LoginURL:  "/api/auth/oauth2/" + settings.ID + "/start",
+			ID: settings.AuthKey, Name: name,
+			LoginURL:  "/api/auth/oauth2/" + settings.AuthKey + "/start",
 			PortalURL: settings.PortalURL,
 		})
 	}
@@ -142,15 +142,15 @@ func (s *Server) oauthCallback(c *gin.Context) {
 	c.Redirect(http.StatusFound, safeReturnPath(transaction.ReturnPath))
 }
 
-func (s *Server) oauthProvider(ctx context.Context, id string) (oauth2.Provider, store.SSOConfig, error) {
-	settings, err := s.db.SSOConfig(ctx, id)
+func (s *Server) oauthProvider(ctx context.Context, authKey string) (oauth2.Provider, store.SSOConfig, error) {
+	settings, err := s.db.SSOConfigByAuthKey(ctx, authKey)
 	if err != nil {
 		return nil, store.SSOConfig{}, err
 	}
 	if !settings.Enabled {
 		return nil, store.SSOConfig{}, store.ErrNotFound
 	}
-	ciphertext, err := s.db.SSOClientSecret(ctx, id)
+	ciphertext, err := s.db.SSOClientSecret(ctx, settings.ID)
 	if errors.Is(err, store.ErrNotFound) {
 		return nil, store.SSOConfig{}, errors.New("已启用站点未配置客户端密钥")
 	}
@@ -170,7 +170,7 @@ func (s *Server) oauthProvider(ctx context.Context, id string) (oauth2.Provider,
 
 func settingsToOAuth2(settings store.SSOConfig, clientSecret string) oauth2.Config {
 	return oauth2.Config{
-		ID: settings.ProviderID(), Name: settings.ProviderName,
+		ID: settings.ProviderID(), AuthKey: settings.AuthKey, Name: settings.ProviderName,
 		AuthorizeURL: settings.AuthorizeURL,
 		TokenURL:     settings.TokenURL, UserInfoURL: settings.UserInfoURL,
 		ClientID: settings.ClientID, ClientSecret: clientSecret,

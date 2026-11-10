@@ -30,7 +30,9 @@ const clientSecret = ref('')
 const clearClientSecret = ref(false)
 const providers = ref<SSOProvider[]>([])
 const draft = ref<SSOConfig>(defaults())
-const callbackPath = ref('/api/auth/oauth2/pending/callback')
+const callbackPath = computed(
+  () => `/api/auth/oauth2/${draft.value.authKey.trim() || 'pending'}/callback`,
+)
 
 const callbackURL = computed({
   get: () => draft.value.redirectUri || `${window.location.origin}${callbackPath.value}`,
@@ -47,6 +49,7 @@ onMounted(loadProviders)
 function defaults(): SSOConfig {
   return {
     id: '',
+    authKey: '',
     enabled: false,
     providerName: '统一身份认证',
     endpointBaseUrl: '',
@@ -85,7 +88,6 @@ function createProvider() {
   draft.value = defaults()
   clientSecret.value = ''
   clearClientSecret.value = false
-  callbackPath.value = '/api/auth/oauth2/pending/callback'
   mode.value = 'edit'
 }
 
@@ -94,7 +96,6 @@ function editProvider(provider: SSOProvider) {
   draft.value = { ...provider, scopes: [...provider.scopes] }
   clientSecret.value = ''
   clearClientSecret.value = false
-  callbackPath.value = provider.callbackPath
   mode.value = 'edit'
 }
 
@@ -104,6 +105,10 @@ async function backToList() {
 }
 
 async function save() {
+  if (!draft.value.authKey.trim()) {
+    message.warning('请填写认证标识')
+    return
+  }
   if (draft.value.enabled && !draft.value.clientId.trim()) {
     message.warning('启用单点登录前请填写客户端 ID')
     return
@@ -126,7 +131,6 @@ async function save() {
     })
     editingId.value = data.id
     draft.value = { ...data, scopes: [...data.scopes] }
-    callbackPath.value = data.callbackPath
     clientSecret.value = ''
     clearClientSecret.value = false
     message.success('单点登录站点已保存')
@@ -135,6 +139,21 @@ async function save() {
     message.error(reason instanceof Error ? reason.message : '保存单点登录配置失败')
   } finally {
     saving.value = false
+  }
+}
+
+function updateAuthKey(value: string) {
+  const previous = draft.value.authKey
+  draft.value.authKey = value
+  if (!draft.value.redirectUri || !previous) return
+  try {
+    const parsed = new URL(draft.value.redirectUri)
+    if (parsed.pathname === `/api/auth/oauth2/${previous}/callback`) {
+      parsed.pathname = `/api/auth/oauth2/${value.trim() || 'pending'}/callback`
+      draft.value.redirectUri = parsed.toString()
+    }
+  } catch {
+    // 手工填写的非标准回调地址保持不变。
   }
 }
 
@@ -185,6 +204,7 @@ async function removeProvider() {
                   </NTag>
                 </div>
                 <span>{{ provider.endpointBaseUrl || '尚未配置端点' }}</span>
+                <small>认证标识：{{ provider.authKey }}</small>
                 <small :title="provider.redirectUri">
                   回调地址：{{ provider.redirectUri || '尚未配置' }}
                 </small>
@@ -210,13 +230,23 @@ async function removeProvider() {
             </div>
 
             <div class="sso-form-grid">
+              <NFormItem label="认证标识" required>
+                <NInput
+                  :value="draft.authKey"
+                  placeholder="例如 collie"
+                  @update:value="updateAuthKey"
+                />
+                <span class="form-hint">
+                  用于生成 /api/auth/oauth2/&lt;认证标识&gt;/start 和 callback 路径，保存后修改需同步身份服务。
+                </span>
+              </NFormItem>
               <NFormItem label="显示名称">
                 <NInput v-model:value="draft.providerName" placeholder="例如 Collie" />
               </NFormItem>
-              <NFormItem label="客户端 ID">
-                <NInput v-model:value="draft.clientId" placeholder="App.id 或客户端 ID" />
-              </NFormItem>
             </div>
+            <NFormItem label="客户端 ID">
+              <NInput v-model:value="draft.clientId" placeholder="App.id 或客户端 ID" />
+            </NFormItem>
 
             <NFormItem :label="draft.hasClientSecret ? '客户端密钥（已配置，留空保持不变）' : '客户端密钥'">
               <NInput

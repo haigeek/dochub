@@ -30,8 +30,8 @@ func TestAuthOptionsUsesEnabledSettings(t *testing.T) {
 	} {
 		if _, err := db.DB.Exec(ctx, `
 			INSERT INTO sso_settings
-				(id, provider_id, enabled, provider_name, portal_url, client_secret_ciphertext)
-			VALUES ($1, $1, $2, $1, 'https://portal.test', $3)`,
+				(id, auth_key, provider_id, enabled, provider_name, portal_url, client_secret_ciphertext)
+			VALUES ($1, $1, $1, $2, $1, 'https://portal.test', $3)`,
 			fixture.id, fixture.enabled, fixture.secret,
 		); err != nil {
 			t.Fatal(err)
