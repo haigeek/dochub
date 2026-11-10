@@ -439,6 +439,9 @@ function defaultDocumentPath(items: DocumentItem[]) {
   )
 }
 
+// 按路径自然排序，让文件名中的数字前缀参与排序，并把 10 排在 2 之后。
+const sidebarCollator = new Intl.Collator('zh-CN', { numeric: true, sensitivity: 'base' })
+
 function buildSidebarTree(items: DocumentItem[], prefix = ''): SidebarTreeNode[] {
   const folders = new Map<string, DocumentItem[]>()
   const files: SidebarTreeNode[] = []
@@ -459,7 +462,7 @@ function buildSidebarTree(items: DocumentItem[], prefix = ''): SidebarTreeNode[]
     folders.set(folder, list)
   }
   const folderNodes: SidebarTreeNode[] = [...folders.entries()]
-    .sort(([left], [right]) => left.localeCompare(right, 'zh-CN'))
+    .sort(([left], [right]) => sidebarCollator.compare(left, right))
     .map(([folder, children]) => {
       const folderPath = prefix ? `${prefix}/${folder}` : folder
       return {
@@ -471,7 +474,7 @@ function buildSidebarTree(items: DocumentItem[], prefix = ''): SidebarTreeNode[]
     })
   return [
     ...folderNodes,
-    ...files.sort((left, right) => String(left.label).localeCompare(String(right.label), 'zh-CN')),
+    ...files.sort((left, right) => sidebarCollator.compare(String(left.key), String(right.key))),
   ]
 }
 

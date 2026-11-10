@@ -1,5 +1,6 @@
 .DS_Store
 .env
+.pnpm-store/
 data/
 server/dochub
 server/config.env
