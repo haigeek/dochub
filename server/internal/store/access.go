@@ -321,6 +321,25 @@ func (s *Store) CanReadDocumentAsset(
 	return allowed, err
 }
 
+func (s *Store) DocumentHasAsset(
+	ctx context.Context,
+	projectID, branchID, documentPath, assetPath string,
+) (bool, error) {
+	var exists bool
+	err := s.DB.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM document_assets da
+			JOIN project_branches pb ON pb.id = da.branch_id
+			WHERE pb.project_id = $1
+			  AND pb.id = $2
+			  AND da.document_path = $3
+			  AND da.asset_path = $4
+		)`, projectID, branchID, documentPath, assetPath,
+	).Scan(&exists)
+	return exists, err
+}
+
 func (s *Store) backfillDocumentAssets(ctx context.Context) error {
 	// 升级已有数据时补建引用关系，新同步由 FinishBranchSync 原子写入。
 	rows, err := s.DB.Query(ctx, `

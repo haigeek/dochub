@@ -1,9 +1,13 @@
 package docs
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"dochub/internal/store"
 )
 
 func TestValidateRepoURL(t *testing.T) {
@@ -87,7 +91,21 @@ func TestCleanRelative(t *testing.T) {
 	}
 }
 
-func TestIndexMarkdown(t *testing.T) {
+func TestGitErrorUsesActionableRepositoryPermissionMessage(t *testing.T) {
+	output := []byte(`remote: remote: ========================================
+remote: The project you were looking for could not be found or you don't have permission to view it.
+remote: fatal: Could not read from remote repository.
+remote: Please make sure you have the correct access rights and the repository exists.`)
+	err := gitError("克隆仓库", output, errors.New("exit status 128"))
+	message := err.Error()
+	if !strings.Contains(message, "Jenkinsadmin") ||
+		!strings.Contains(message, "只读权限") ||
+		strings.Contains(message, "remote:") {
+		t.Fatalf("仓库权限错误提示不够简洁明确: %s", message)
+	}
+}
+
+func TestIndexDocuments(t *testing.T) {
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, "guide"), 0o755); err != nil {
 		t.Fatal(err)
@@ -98,7 +116,7 @@ func TestIndexMarkdown(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "guide", "start.md"), []byte("无标题"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	docs, err := indexMarkdown(root)
+	docs, err := indexDocuments(root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +125,7 @@ func TestIndexMarkdown(t *testing.T) {
 	}
 }
 
-func TestIndexMarkdownKeepsRepositoryPaths(t *testing.T) {
+func TestIndexDocumentsKeepsRepositoryPaths(t *testing.T) {
 	root := t.TempDir()
 	for _, file := range []string{
 		filepath.Join("docs", "README.md"),
@@ -121,11 +139,65 @@ func TestIndexMarkdownKeepsRepositoryPaths(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	documents, err := indexMarkdown(root)
+	documents, err := indexDocuments(root)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(documents) != 2 || documents[0].Path != "design/README.md" || documents[1].Path != "docs/README.md" {
 		t.Fatalf("多目录索引应保留完整仓库路径: %#v", documents)
+	}
+}
+
+func TestIndexDocumentsSupportsHTML(t *testing.T) {
+	root := t.TempDir()
+	source := `<!doctype html>
+<html>
+<head>
+  <title>HTML 接入指南</title>
+  <link rel="stylesheet" href="./assets/guide.css">
+</head>
+<body>
+  <h1>备用标题</h1>
+  <p>这里是正文内容。</p>
+  <img src="assets/architecture.png" alt="架构图">
+</body>
+</html>`
+	fullPath := filepath.Join(root, "docs", "guide.html")
+	if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fullPath, []byte(source), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "docs", "assets"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(root, "docs", "assets", "guide.css"),
+		[]byte(`@font-face { src: url("../fonts/inter.woff2"); }`),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+	documents, err := indexDocuments(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(documents) != 1 {
+		t.Fatalf("HTML 文档索引数量错误: %#v", documents)
+	}
+	document := documents[0]
+	if document.Format != store.DocumentFormatHTML ||
+		document.Title != "HTML 接入指南" ||
+		document.HTML != source ||
+		document.Markdown != "" ||
+		document.PlainText != "备用标题 这里是正文内容。" {
+		t.Fatalf("HTML 文档索引错误: %#v", document)
+	}
+	if len(document.Assets) != 3 ||
+		document.Assets[0] != "docs/assets/guide.css" ||
+		document.Assets[1] != "docs/assets/architecture.png" ||
+		document.Assets[2] != "docs/fonts/inter.woff2" {
+		t.Fatalf("HTML 资源索引错误: %#v", document.Assets)
 	}
 }

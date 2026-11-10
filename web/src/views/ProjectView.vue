@@ -20,6 +20,7 @@ import {
   CopyOutline,
   DownloadOutline,
   EllipsisHorizontal,
+  FolderOpenOutline,
   GitBranchOutline,
   KeyOutline,
   ListOutline,
@@ -31,6 +32,7 @@ import {
 import AppHeader from '@/components/AppHeader.vue'
 import DocSidebarNode from '@/components/DocSidebarNode.vue'
 import DocumentAccessModal from '@/components/DocumentAccessModal.vue'
+import HtmlSandbox from '@/components/HtmlSandbox.vue'
 import MarkdownArticle from '@/components/MarkdownArticle.vue'
 import ProjectManageModal from '@/components/ProjectManageModal.vue'
 import { api, downloadFile } from '@/api'
@@ -74,9 +76,17 @@ const expandedKeys = ref<string[]>([])
 const searchQuery = ref('')
 const searchResults = ref<SearchResult[]>([])
 const searching = ref(false)
+const sidebarMode = ref<SidebarMode>(readSidebarMode())
 let searchTimer: ReturnType<typeof setTimeout> | undefined
 let statusTimer: ReturnType<typeof setTimeout> | undefined
 let unmounted = false
+
+interface HighlightPart {
+  text: string
+  highlighted: boolean
+}
+
+type SidebarMode = 'folder' | 'flat'
 
 const currentBranch = computed(() =>
   project.value?.branches.find((branch) => branch.name === branchName.value) ?? null,
@@ -92,6 +102,14 @@ const branchOptions = computed(() =>
     label: `${branch.name}${branch.status === 'running' ? ' · 同步中' : ''}`,
     value: branch.name,
   })) ?? [],
+)
+const highlightedSearchResults = computed(() =>
+  searchResults.value.map((result) => ({
+    ...result,
+    titleParts: highlightParts(result.title, searchQuery.value),
+    pathParts: highlightParts(result.path, searchQuery.value),
+    excerptParts: highlightParts(result.excerpt, searchQuery.value),
+  })),
 )
 const docRoots = computed(() => project.value?.docRoots?.length ? project.value.docRoots : ['docs'])
 const sidebarRoots = computed<SidebarTreeNode[]>(() => {
@@ -215,6 +233,7 @@ async function loadDocument(docPath: string, branch = branchName.value) {
   if (!project.value || !branch) return
   documentLoading.value = true
   activeHeading.value = ''
+  headings.value = []
   try {
     document.value = await api<DocumentContent>(
       `/api/projects/${project.value.id}/doc?branch=${encodeURIComponent(branch)}&path=${encodeURIComponent(docPath)}`,
@@ -344,6 +363,30 @@ async function searchDocuments() {
   }
 }
 
+function highlightParts(text: string, query: string): HighlightPart[] {
+  const keyword = query.trim()
+  if (!keyword) return [{ text, highlighted: false }]
+  const pattern = new RegExp(escapeRegExp(keyword), 'giu')
+  const parts: HighlightPart[] = []
+  let cursor = 0
+  for (const match of text.matchAll(pattern)) {
+    const index = match.index ?? 0
+    if (index > cursor) {
+      parts.push({ text: text.slice(cursor, index), highlighted: false })
+    }
+    parts.push({ text: match[0], highlighted: true })
+    cursor = index + match[0].length
+  }
+  if (cursor < text.length) {
+    parts.push({ text: text.slice(cursor), highlighted: false })
+  }
+  return parts.length ? parts : [{ text, highlighted: false }]
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
 async function downloadCurrentDocument() {
   if (!project.value || !document.value || !branchName.value) return
   downloading.value = true
@@ -430,10 +473,16 @@ function assetURL(path: string) {
   return `/api/projects/${project.value.id}/assets/${encoded}?branch=${encodeURIComponent(branchName.value)}`
 }
 
+function htmlPreviewURL(docPath: string) {
+  if (!project.value || !currentBranch.value) return ''
+  return `/api/projects/${encodeURIComponent(project.value.id)}/html-preview/` +
+    `${encodeURIComponent(currentBranch.value.id)}?path=${encodeURIComponent(docPath)}`
+}
+
 function defaultDocumentPath(items: DocumentItem[]) {
   return (
-    items.find((item) => /(^|\/)readme\.md$/i.test(item.path))?.path ??
-    items.find((item) => /(^|\/)index\.md$/i.test(item.path))?.path ??
+    items.find((item) => /(^|\/)readme\.(md|html?)$/i.test(item.path))?.path ??
+    items.find((item) => /(^|\/)index\.(md|html?)$/i.test(item.path))?.path ??
     items[0]?.path ??
     ''
   )
@@ -441,6 +490,26 @@ function defaultDocumentPath(items: DocumentItem[]) {
 
 // 按路径自然排序，让文件名中的数字前缀参与排序，并把 10 排在 2 之后。
 const sidebarCollator = new Intl.Collator('zh-CN', { numeric: true, sensitivity: 'base' })
+const flatDocuments = computed(() =>
+  [...documents.value].sort((left, right) => sidebarCollator.compare(left.path, right.path)),
+)
+
+function readSidebarMode(): SidebarMode {
+  try {
+    return localStorage.getItem('dochub.sidebar-mode') === 'flat' ? 'flat' : 'folder'
+  } catch {
+    return 'folder'
+  }
+}
+
+function toggleSidebarMode() {
+  sidebarMode.value = sidebarMode.value === 'folder' ? 'flat' : 'folder'
+  try {
+    localStorage.setItem('dochub.sidebar-mode', sidebarMode.value)
+  } catch {
+    // 浏览器禁用本地存储时，当前页面内仍可切换。
+  }
+}
 
 function buildSidebarTree(items: DocumentItem[], prefix = ''): SidebarTreeNode[] {
   const folders = new Map<string, DocumentItem[]>()
@@ -497,6 +566,23 @@ function branchStatusLabel(branch: Branch | null): '已同步' | '同步中' | '
   if (branch?.status === 'running') return '同步中'
   if (branch?.status === 'failed') return '同步失败'
   return '待同步'
+}
+
+function syncErrorMessage(message: string) {
+  const detail = message.toLocaleLowerCase('en-US')
+  if (
+    detail.includes('could not read from remote repository') ||
+    detail.includes('permission denied (publickey)') ||
+    detail.includes('repository not found') ||
+    detail.includes('project you were looking for could not be found') ||
+    detail.includes('not allowed to download code') ||
+    detail.includes('permission to view it') ||
+    detail.includes('access denied') ||
+    detail.includes('authentication failed')
+  ) {
+    return '无法访问代码仓库。请确认已为同步账号 Jenkinsadmin 授予该仓库或所属 GitLab 组的只读权限，并检查 SSH 凭据和仓库地址后重试'
+  }
+  return message
 }
 
 function branchStatusType(branch: Branch | null): 'success' | 'warning' | 'error' | 'default' {
@@ -651,7 +737,7 @@ function safeDecodeAnchor(value: string) {
 
     <div v-if="project && currentBranch?.status === 'failed'" class="branch-alert">
       <NAlert type="error" :show-icon="false" closable>
-        当前分支同步失败，正在展示上一份可用快照。{{ currentBranch.lastError }}
+        当前分支同步失败，正在展示上一份可用快照。{{ syncErrorMessage(currentBranch.lastError) }}
       </NAlert>
     </div>
 
@@ -660,20 +746,52 @@ function safeDecodeAnchor(value: string) {
         <nav class="docs-sidebar-nav" aria-label="文档目录">
           <div class="sidebar-heading">
             <span>文档目录</span>
-            <NTag :type="branchStatusType(currentBranch)" size="small">
-              {{ branchStatusLabel(currentBranch) }}
-            </NTag>
+            <div class="sidebar-heading-actions">
+              <NTag :type="branchStatusType(currentBranch)" size="small">
+                {{ branchStatusLabel(currentBranch) }}
+              </NTag>
+              <NButton
+                secondary
+                size="small"
+                class="sidebar-mode-toggle"
+                :title="sidebarMode === 'folder' ? '切换为文件列表' : '切换为目录结构'"
+                :aria-label="sidebarMode === 'folder' ? '切换为文件列表' : '切换为目录结构'"
+                @click="toggleSidebarMode"
+              >
+                <template #icon>
+                  <FolderOpenOutline v-if="sidebarMode === 'flat'" />
+                  <ListOutline v-else />
+                </template>
+                {{ sidebarMode === 'folder' ? '平铺' : '目录' }}
+              </NButton>
+            </div>
           </div>
-          <DocSidebarNode
-            v-for="root in sidebarRoots"
-            :key="root.key"
-            class="docs-tree"
-            :node="root"
-            :selected-path="document?.path ?? ''"
-            :expanded-keys="expandedKeys"
-            @select="openDocument"
-            @toggle="toggleSidebarFolder"
-          />
+          <template v-if="sidebarMode === 'folder'">
+            <DocSidebarNode
+              v-for="root in sidebarRoots"
+              :key="root.key"
+              class="docs-tree"
+              :node="root"
+              :selected-path="document?.path ?? ''"
+              :expanded-keys="expandedKeys"
+              @select="openDocument"
+              @toggle="toggleSidebarFolder"
+            />
+          </template>
+          <div v-else class="doc-flat-list">
+            <button
+              v-for="item in flatDocuments"
+              :key="item.path"
+              type="button"
+              class="doc-flat-item"
+              :class="{ active: document?.path === item.path }"
+              :aria-current="document?.path === item.path ? 'page' : undefined"
+              @click="openDocument(item.path)"
+            >
+              <span class="doc-flat-item__title">{{ item.title }}</span>
+              <span class="doc-flat-item__path">{{ item.path }}</span>
+            </button>
+          </div>
         </nav>
         <div class="sidebar-footer">
           <span class="sidebar-meta">
@@ -747,9 +865,19 @@ function safeDecodeAnchor(value: string) {
           </span>
         </div>
         <NSpin :show="loading || documentLoading">
-          <div v-if="document" class="doc-paper">
+          <div
+            v-if="document"
+            class="doc-paper"
+            :class="{ 'html-doc-paper': document.format === 'html' }"
+          >
+            <HtmlSandbox
+              v-if="document.format === 'html'"
+              :src="htmlPreviewURL(document.path)"
+              :title="document.title"
+            />
             <MarkdownArticle
-              :markdown="document.markdown"
+              v-else
+              :markdown="document.markdown ?? ''"
               :doc-path="document.path"
               :resolve-asset="assetURL"
               @headings="headings = $event"
@@ -807,16 +935,42 @@ function safeDecodeAnchor(value: string) {
 
     <NDrawer v-model:show="showMobileTree" placement="left" :width="320">
       <NDrawerContent title="文档目录" closable>
-        <DocSidebarNode
-          v-for="root in sidebarRoots"
-          :key="root.key"
-          class="docs-tree"
-          :node="root"
-          :selected-path="document?.path ?? ''"
-          :expanded-keys="expandedKeys"
-          @select="openDocument"
-          @toggle="toggleSidebarFolder"
-        />
+        <div class="mobile-sidebar-mode">
+          <span>{{ sidebarMode === 'folder' ? '目录结构' : '文件列表' }}</span>
+          <NButton size="small" secondary @click="toggleSidebarMode">
+            <template #icon>
+              <FolderOpenOutline v-if="sidebarMode === 'flat'" />
+              <ListOutline v-else />
+            </template>
+            {{ sidebarMode === 'folder' ? '切换为文件列表' : '切换为目录结构' }}
+          </NButton>
+        </div>
+        <template v-if="sidebarMode === 'folder'">
+          <DocSidebarNode
+            v-for="root in sidebarRoots"
+            :key="root.key"
+            class="docs-tree"
+            :node="root"
+            :selected-path="document?.path ?? ''"
+            :expanded-keys="expandedKeys"
+            @select="openDocument"
+            @toggle="toggleSidebarFolder"
+          />
+        </template>
+        <div v-else class="doc-flat-list">
+          <button
+            v-for="item in flatDocuments"
+            :key="item.path"
+            type="button"
+            class="doc-flat-item"
+            :class="{ active: document?.path === item.path }"
+            :aria-current="document?.path === item.path ? 'page' : undefined"
+            @click="openDocument(item.path)"
+          >
+            <span class="doc-flat-item__title">{{ item.title }}</span>
+            <span class="doc-flat-item__path">{{ item.path }}</span>
+          </button>
+        </div>
       </NDrawerContent>
     </NDrawer>
 
@@ -850,21 +1004,36 @@ function safeDecodeAnchor(value: string) {
         </div>
         <div class="search-result-list">
           <button
-            v-for="result in searchResults"
+            v-for="result in highlightedSearchResults"
             :key="result.path"
             class="search-result"
             @click="selectSearchResult(result)"
           >
-            <strong>{{ result.title }}</strong>
-            <small>{{ result.path }}</small>
-            <p>{{ result.excerpt }}</p>
+            <strong>
+              <template v-for="(part, index) in result.titleParts" :key="index">
+                <mark v-if="part.highlighted">{{ part.text }}</mark>
+                <template v-else>{{ part.text }}</template>
+              </template>
+            </strong>
+            <small>
+              <template v-for="(part, index) in result.pathParts" :key="index">
+                <mark v-if="part.highlighted">{{ part.text }}</mark>
+                <template v-else>{{ part.text }}</template>
+              </template>
+            </small>
+            <p>
+              <template v-for="(part, index) in result.excerptParts" :key="index">
+                <mark v-if="part.highlighted">{{ part.text }}</mark>
+                <template v-else>{{ part.text }}</template>
+              </template>
+            </p>
           </button>
           <NEmpty
             v-if="searchQuery && !searching && searchResults.length === 0"
             description="没有找到匹配的文档"
           />
           <div v-if="!searchQuery" class="search-tip">
-            输入关键词搜索当前分支，结果覆盖标题、路径和正文。
+            输入关键词搜索当前分支，结果覆盖标题、路径和正文并高亮匹配内容。
           </div>
         </div>
       </div>

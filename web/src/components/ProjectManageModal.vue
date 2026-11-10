@@ -48,6 +48,7 @@ const projectUserIds = ref<string[]>([])
 const projectOrganizationIds = ref<string[]>([])
 const form = reactive({
   name: '',
+  description: '',
   repoUrl: '',
   docRoots: [] as string[],
   isPublic: false,
@@ -71,6 +72,7 @@ watch(
   async ([show, project]) => {
     if (!show || !project) return
     form.name = project.name
+    form.description = project.description
     form.repoUrl = project.repoUrl
     form.docRoots = [...project.docRoots]
     form.isPublic = project.isPublic
@@ -200,6 +202,16 @@ async function saveProjectAccess() {
         <NForm label-placement="top">
           <NFormItem label="项目名称">
             <NInput v-model:value="form.name" />
+          </NFormItem>
+          <NFormItem label="项目描述">
+            <NInput
+              v-model:value="form.description"
+              type="textarea"
+              :maxlength="500"
+              show-count
+              :autosize="{ minRows: 2, maxRows: 4 }"
+              placeholder="简要说明项目用途"
+            />
           </NFormItem>
           <NFormItem label="可见范围">
             <NSpace align="center">

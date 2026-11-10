@@ -142,14 +142,14 @@ func (s *Service) SyncBranch(ctx context.Context, projectID, branch string) erro
 			return fmt.Errorf("复制文档目录 %s 失败: %w", docRoot, err)
 		}
 	}
-	documents, err := indexMarkdown(tempSnapshot)
+	documents, err := indexDocuments(tempSnapshot)
 	if err != nil {
 		os.RemoveAll(tempSnapshot)
 		return fmt.Errorf("建立文档索引失败: %w", err)
 	}
 	if len(documents) == 0 {
 		os.RemoveAll(tempSnapshot)
-		return fmt.Errorf("文档目录 %s 中没有 Markdown 文件", strings.Join(docRoots, "、"))
+		return fmt.Errorf("文档目录 %s 中没有 Markdown 或 HTML 文件", strings.Join(docRoots, "、"))
 	}
 
 	finalSnapshot := filepath.Join(
@@ -410,7 +410,7 @@ func cleanRelative(raw string) (string, error) {
 	return clean, nil
 }
 
-func indexMarkdown(root string) ([]store.DocFile, error) {
+func indexDocuments(root string) ([]store.DocFile, error) {
 	var documents []store.DocFile
 	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -422,7 +422,11 @@ func indexMarkdown(root string) ([]store.DocFile, error) {
 			}
 			return nil
 		}
-		if entry.IsDir() || !strings.EqualFold(filepath.Ext(entry.Name()), ".md") {
+		if entry.IsDir() {
+			return nil
+		}
+		format := documentFormat(entry.Name())
+		if format == "" {
 			return nil
 		}
 		info, err := entry.Info()
@@ -440,17 +444,88 @@ func indexMarkdown(root string) ([]store.DocFile, error) {
 		if err != nil {
 			return err
 		}
-		markdown := string(raw)
+		source := string(raw)
+		relativePath := filepath.ToSlash(relative)
+		title := ""
+		plainText := ""
+		assets := []string(nil)
+		markdown := ""
+		htmlSource := ""
+		switch format {
+		case store.DocumentFormatHTML:
+			metadata := docparse.ParseHTML(source, relativePath)
+			title = metadata.Title
+			plainText = metadata.PlainText
+			assets = expandCSSAssets(root, metadata.Assets)
+			htmlSource = source
+		default:
+			title = extractTitle(source, entry.Name())
+			plainText = markdownToPlainText(source)
+			assets = docparse.ExtractAssets(source, relativePath)
+			markdown = source
+		}
 		documents = append(documents, store.DocFile{
-			Path:      filepath.ToSlash(relative),
-			Title:     extractTitle(markdown, entry.Name()),
+			Path:      relativePath,
+			Title:     title,
+			Format:    format,
 			Markdown:  markdown,
-			PlainText: markdownToPlainText(markdown),
-			Assets:    docparse.ExtractAssets(markdown, filepath.ToSlash(relative)),
+			HTML:      htmlSource,
+			PlainText: plainText,
+			Assets:    assets,
 		})
 		return nil
 	})
 	return documents, err
+}
+
+func documentFormat(fileName string) string {
+	switch strings.ToLower(filepath.Ext(fileName)) {
+	case ".md":
+		return store.DocumentFormatMarkdown
+	case ".html", ".htm":
+		return store.DocumentFormatHTML
+	default:
+		return ""
+	}
+}
+
+// sandbox 资源必须提前建立权限关系，因此递归收集 CSS 的 @import 和 url() 依赖。
+func expandCSSAssets(root string, assets []string) []string {
+	seen := make(map[string]struct{}, len(assets))
+	result := make([]string, 0, len(assets))
+	for _, asset := range assets {
+		if _, exists := seen[asset]; exists {
+			continue
+		}
+		seen[asset] = struct{}{}
+		result = append(result, asset)
+	}
+	for index := 0; index < len(result); index++ {
+		asset := result[index]
+		if !strings.EqualFold(filepath.Ext(asset), ".css") {
+			continue
+		}
+		sourcePath := filepath.Join(root, filepath.FromSlash(asset))
+		if !isWithin(root, sourcePath) {
+			continue
+		}
+		info, err := os.Stat(sourcePath)
+		if err != nil || !info.Mode().IsRegular() || info.Size() > 5<<20 {
+			continue
+		}
+		source, err := os.ReadFile(sourcePath)
+		if err != nil {
+			continue
+		}
+		for _, dependency := range docparse.ExtractCSSAssets(string(source), asset) {
+			if _, exists := seen[dependency]; exists {
+				continue
+			}
+			seen[dependency] = struct{}{}
+			result = append(result, dependency)
+		}
+	}
+	return result
 }
 
 func copyTree(source, target string) error {
@@ -536,11 +611,31 @@ func shortHash(value string) string {
 
 func gitError(action string, output []byte, err error) error {
 	message := strings.TrimSpace(string(output))
-	if len(message) > 800 {
-		message = message[len(message)-800:]
-	}
 	if message == "" {
 		message = err.Error()
 	}
-	return fmt.Errorf("%s失败: %s", action, message)
+	detail := strings.ToLower(message)
+	switch {
+	case strings.Contains(detail, "permission denied (publickey)"),
+		strings.Contains(detail, "could not read from remote repository"),
+		strings.Contains(detail, "repository not found"),
+		strings.Contains(detail, "project you were looking for could not be found"),
+		strings.Contains(detail, "not allowed to download code"),
+		strings.Contains(detail, "permission to view it"),
+		strings.Contains(detail, "access denied"),
+		strings.Contains(detail, "authentication failed"):
+		return fmt.Errorf(
+			"无法访问代码仓库。请确认已为同步账号 Jenkinsadmin 授予该仓库或所属 GitLab 组的只读权限，并检查 SSH 凭据和仓库地址后重试",
+		)
+	case strings.Contains(detail, "host key verification failed"):
+		return fmt.Errorf("Git 主机身份校验失败，请更新服务器 SSH known_hosts 后重试")
+	case strings.Contains(detail, "could not resolve hostname"):
+		return fmt.Errorf("无法解析 Git 主机，请检查仓库地址和服务器 DNS 配置后重试")
+	case strings.Contains(detail, "connection timed out"),
+		strings.Contains(detail, "connection refused"),
+		strings.Contains(detail, "network is unreachable"):
+		return fmt.Errorf("连接 Git 仓库失败，请检查服务器网络和仓库地址后重试")
+	default:
+		return fmt.Errorf("%s失败，请检查仓库地址、SSH 凭据和服务器网络后重试", action)
+	}
 }

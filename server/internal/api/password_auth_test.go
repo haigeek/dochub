@@ -27,7 +27,7 @@ func TestPasswordChangeAndBasicAuth(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	project, err := db.CreateProject(ctx, "Basic project", "git@git.test:team/basic.git",
+	project, err := db.CreateProject(ctx, "Basic project", "", "git@git.test:team/basic.git",
 		[]string{"docs"}, user.ID, []string{"main"}, true)
 	if err != nil {
 		t.Fatal(err)

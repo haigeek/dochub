@@ -30,7 +30,7 @@ func TestPersonalAccessToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	project, err := db.CreateProject(ctx, "Token project", "git@git.test:team/token.git",
+	project, err := db.CreateProject(ctx, "Token project", "", "git@git.test:team/token.git",
 		[]string{"docs"}, owner.ID, []string{"main"}, false)
 	if err != nil {
 		t.Fatal(err)

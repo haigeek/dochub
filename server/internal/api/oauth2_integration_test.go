@@ -43,7 +43,7 @@ func TestCollieIntegration(t *testing.T) {
 	if err := db.Migrate(ctx); err != nil {
 		t.Fatalf("迁移不幂等: %v", err)
 	}
-	project, err := db.CreateProject(ctx, "private", "git@git.test:team/private.git", []string{"docs"}, local.ID, []string{"main"}, false)
+	project, err := db.CreateProject(ctx, "private", "", "git@git.test:team/private.git", []string{"docs"}, local.ID, []string{"main"}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -515,7 +515,7 @@ func TestSSOAdminConfiguration(t *testing.T) {
 
 	secondBody, _ := json.Marshal(gin.H{
 		"clientSecret": "second-secret", "enabled": true, "authKey": "second",
-		"providerName": "第二身份站点",
+		"providerName":    "第二身份站点",
 		"endpointBaseUrl": "http://127.0.0.1:2", "authorizePath": "/authorize",
 		"tokenPath": "/token", "userInfoPath": "/me", "clientId": "second-client",
 		"redirectUri":     "https://public-docs.test/gateway/oauth/callback",

@@ -44,6 +44,7 @@ const filteredProjects = computed(() => {
   return projects.value.filter((project) => {
     const searchable = [
       project.name,
+      project.description,
       project.slug,
       project.repoUrl,
       project.ownerName,
@@ -138,7 +139,7 @@ function formatProjectTime(value: string) {
         <div>
           <span class="eyebrow">KNOWLEDGE AT SOURCE</span>
           <h1>项目文档</h1>
-          <p>把散落在源码目录里的 Markdown 文档，整理成团队随时可读的知识入口。</p>
+          <p>把散落在源码目录里的 Markdown 与 HTML 文档，整理成团队随时可读的知识入口。</p>
         </div>
         <div class="projects-hero-actions">
           <NButton type="primary" @click="showCreate = true">
@@ -154,7 +155,7 @@ function formatProjectTime(value: string) {
             v-model:value="searchQuery"
             class="project-search"
             clearable
-            placeholder="搜索项目名称、仓库地址或分支"
+            placeholder="搜索项目名称、描述、仓库地址或分支"
           >
             <template #prefix><SearchOutline /></template>
           </NInput>
@@ -203,10 +204,13 @@ function formatProjectTime(value: string) {
           >
             <div class="project-list-main">
               <span class="project-icon">{{ project.name.slice(0, 1).toUpperCase() }}</span>
-              <span class="project-list-copy">
+              <div class="project-list-copy">
                 <strong>{{ project.name }} <NTag size="small">{{ project.isPublic ? '公开' : '私有' }}</NTag></strong>
+                <p class="project-list-description" :title="project.description">
+                  {{ project.description || '暂无项目描述' }}
+                </p>
                 <small>{{ project.repoUrl }}</small>
-              </span>
+              </div>
             </div>
             <div class="project-list-branches">
               <span v-for="branch in project.branches.slice(0, 3)" :key="branch.id">
@@ -259,6 +263,9 @@ function formatProjectTime(value: string) {
               </div>
             </div>
             <h2>{{ project.name }} <NTag size="small">{{ project.isPublic ? '公开' : '私有' }}</NTag></h2>
+            <p class="project-description" :title="project.description">
+              {{ project.description || '暂无项目描述' }}
+            </p>
             <p class="project-path">{{ project.repoUrl }}</p>
             <div class="project-meta">
               <span><GitBranchOutline /> {{ project.branches.length }} 个分支</span>

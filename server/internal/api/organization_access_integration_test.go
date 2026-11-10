@@ -35,7 +35,7 @@ func TestOrganizationAccessAndManagement(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	project, err := db.CreateProject(ctx, "Organization", "git@git.test:team/organization.git",
+	project, err := db.CreateProject(ctx, "Organization", "", "git@git.test:team/organization.git",
 		[]string{"docs"}, owner.ID, []string{"main"}, false)
 	if err != nil {
 		t.Fatal(err)

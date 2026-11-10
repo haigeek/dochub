@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"mime"
@@ -15,17 +16,42 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 	"golang.org/x/crypto/bcrypt"
 
 	"dochub/internal/config"
+	"dochub/internal/docparse"
 	"dochub/internal/docs"
 	"dochub/internal/secretbox"
 	"dochub/internal/store"
 )
 
 const sessionCookie = "dochub_session"
+
+// iframe 和 CSP 同时启用 sandbox：即使页面被单独打开，也不能取得 DocHub 同源权限。
+const htmlSandboxPolicy = "sandbox allow-scripts allow-popups; " +
+	"default-src 'none'; base-uri 'self'; object-src 'none'; frame-src 'none'; " +
+	"form-action 'none'; frame-ancestors 'self'; " +
+	"script-src 'self' 'unsafe-inline' https:; " +
+	"style-src 'self' 'unsafe-inline' https:; " +
+	"img-src 'self' data: blob: https:; " +
+	"font-src 'self' data: https:; " +
+	"media-src 'self' data: blob: https:; " +
+	"connect-src 'self' https:"
+
+const htmlResourceGrantTTL = time.Hour
+
+// sandbox 中的子资源请求不会携带登录 Cookie，使用短期凭证绑定用户、分支和文档。
+type htmlResourceGrant struct {
+	ProjectID    string `json:"projectId"`
+	BranchID     string `json:"branchId"`
+	DocumentPath string `json:"documentPath"`
+	UserID       string `json:"userId"`
+	SessionID    string `json:"sessionId"`
+	ExpiresAt    int64  `json:"expiresAt"`
+}
 
 type contextKey string
 
@@ -51,7 +77,9 @@ func (s *Server) Router() *gin.Engine {
 	router.Use(gin.LoggerWithConfig(gin.LoggerConfig{
 		Skip: func(c *gin.Context) bool {
 			return c.Request.URL.Path == "/api/auth/collie/callback" ||
-				(strings.HasPrefix(c.Request.URL.Path, "/api/auth/oauth2/") && strings.HasSuffix(c.Request.URL.Path, "/callback"))
+				(strings.HasPrefix(c.Request.URL.Path, "/api/auth/oauth2/") &&
+					strings.HasSuffix(c.Request.URL.Path, "/callback")) ||
+				strings.Contains(c.Request.URL.Path, "/sandbox-assets/")
 		},
 	}), gin.Recovery(), securityHeaders())
 	_ = router.SetTrustedProxies(nil)
@@ -74,6 +102,7 @@ func (s *Server) Router() *gin.Engine {
 		c.Params = append(c.Params, gin.Param{Key: "provider", Value: "collie"})
 		s.oauthCallback(c)
 	})
+	api.GET("/projects/:id/sandbox-assets/:token/*assetPath", s.sandboxAsset)
 	protected := api.Group("")
 	protected.Use(s.authenticate())
 	protected.GET("/auth/me", s.me)
@@ -94,6 +123,7 @@ func (s *Server) Router() *gin.Engine {
 	protected.GET("/projects/:id/tree", s.documentTree)
 	protected.GET("/projects/:id/doc", s.document)
 	protected.GET("/projects/:id/doc/download", s.downloadDocument)
+	protected.GET("/projects/:id/html-preview/:branchID", s.htmlPreview)
 	protected.GET("/projects/:id/assets/*assetPath", s.asset)
 	protected.GET("/projects/:id/search", s.search)
 	protected.GET("/jobs/:id", s.job)
@@ -299,18 +329,20 @@ func (s *Server) listProjects(c *gin.Context) {
 
 func (s *Server) createProject(c *gin.Context) {
 	var input struct {
-		Name     string   `json:"name"`
-		RepoURL  string   `json:"repoUrl"`
-		DocRoot  string   `json:"docRoot"`
-		DocRoots []string `json:"docRoots"`
-		Branches []string `json:"branches"`
-		IsPublic bool     `json:"isPublic"`
+		Name        string   `json:"name"`
+		Description string   `json:"description"`
+		RepoURL     string   `json:"repoUrl"`
+		DocRoot     string   `json:"docRoot"`
+		DocRoots    []string `json:"docRoots"`
+		Branches    []string `json:"branches"`
+		IsPublic    bool     `json:"isPublic"`
 	}
 	if err := c.ShouldBindJSON(&input); err != nil {
 		fail(c, http.StatusBadRequest, "INVALID_REQUEST", "项目参数不完整", err.Error())
 		return
 	}
 	input.Name = strings.TrimSpace(input.Name)
+	input.Description = strings.TrimSpace(input.Description)
 	input.RepoURL = strings.TrimSpace(input.RepoURL)
 	if len(input.DocRoots) == 0 && strings.TrimSpace(input.DocRoot) != "" {
 		input.DocRoots = []string{input.DocRoot}
@@ -322,6 +354,9 @@ func (s *Server) createProject(c *gin.Context) {
 	}
 	if input.Name == "" || len(input.Name) > 100 {
 		message = "项目名称长度应为 1-100 个字符"
+	}
+	if utf8.RuneCountInString(input.Description) > 500 {
+		message = "项目描述不能超过 500 个字符"
 	}
 	if message == "" {
 		if err := firstError(
@@ -335,7 +370,9 @@ func (s *Server) createProject(c *gin.Context) {
 		return
 	}
 	user := currentUser(c)
-	project, err := s.db.CreateProject(c, input.Name, input.RepoURL, docRoots, user.ID, branches, input.IsPublic)
+	project, err := s.db.CreateProject(
+		c, input.Name, input.Description, input.RepoURL, docRoots, user.ID, branches, input.IsPublic,
+	)
 	if err != nil {
 		if errors.Is(err, store.ErrSlugExists) {
 			slug, _ := store.ProjectSlug(input.RepoURL)
@@ -368,11 +405,12 @@ func (s *Server) updateProject(c *gin.Context) {
 		return
 	}
 	var input struct {
-		Name     string   `json:"name"`
-		RepoURL  string   `json:"repoUrl"`
-		DocRoot  string   `json:"docRoot"`
-		DocRoots []string `json:"docRoots"`
-		IsPublic *bool    `json:"isPublic"`
+		Name        string   `json:"name"`
+		Description *string  `json:"description"`
+		RepoURL     string   `json:"repoUrl"`
+		DocRoot     string   `json:"docRoot"`
+		DocRoots    []string `json:"docRoots"`
+		IsPublic    *bool    `json:"isPublic"`
 	}
 	if err := c.ShouldBindJSON(&input); err != nil {
 		fail(c, http.StatusBadRequest, "INVALID_REQUEST", "项目参数不完整", err.Error())
@@ -380,6 +418,10 @@ func (s *Server) updateProject(c *gin.Context) {
 	}
 	input.Name = strings.TrimSpace(input.Name)
 	input.RepoURL = strings.TrimSpace(input.RepoURL)
+	description := project.Description
+	if input.Description != nil {
+		description = strings.TrimSpace(*input.Description)
+	}
 	if len(input.DocRoots) == 0 && strings.TrimSpace(input.DocRoot) != "" {
 		input.DocRoots = []string{input.DocRoot}
 	}
@@ -390,6 +432,10 @@ func (s *Server) updateProject(c *gin.Context) {
 	}
 	if input.Name == "" || len(input.Name) > 100 {
 		fail(c, http.StatusBadRequest, "INVALID_PROJECT", "项目名称长度应为 1-100 个字符", "")
+		return
+	}
+	if utf8.RuneCountInString(description) > 500 {
+		fail(c, http.StatusBadRequest, "INVALID_PROJECT", "项目描述不能超过 500 个字符", "")
 		return
 	}
 	if err := firstError(
@@ -404,7 +450,7 @@ func (s *Server) updateProject(c *gin.Context) {
 	if input.IsPublic != nil {
 		isPublic = *input.IsPublic
 	}
-	if err := s.db.UpdateProject(c, project.ID, input.Name, input.RepoURL, docRoots, isPublic); err != nil {
+	if err := s.db.UpdateProject(c, project.ID, input.Name, description, input.RepoURL, docRoots, isPublic); err != nil {
 		internal(c, err)
 		return
 	}
@@ -581,16 +627,91 @@ func (s *Server) downloadDocument(c *gin.Context) {
 		respondRecord(c, nil, err)
 		return
 	}
-	c.Header("Content-Type", "text/markdown; charset=utf-8")
+	contentType := "text/markdown; charset=utf-8"
+	if doc.Format == store.DocumentFormatHTML {
+		contentType = "text/html; charset=utf-8"
+	}
+	c.Header("Content-Type", contentType)
 	c.Header("Content-Disposition", attachmentDisposition(doc.Path))
 	c.Header("Cache-Control", "private, no-store")
 	c.Header("X-Content-Type-Options", "nosniff")
-	c.Data(http.StatusOK, "text/markdown; charset=utf-8", []byte(doc.Markdown))
+	c.Data(http.StatusOK, contentType, []byte(doc.Source()))
 }
 
 func (s *Server) asset(c *gin.Context) {
 	branch := c.Query("branch")
 	relative := strings.TrimPrefix(c.Param("assetPath"), "/")
+	s.serveAsset(c, branch, relative)
+}
+
+func (s *Server) sandboxAsset(c *gin.Context) {
+	grant, err := s.parseHTMLResourceGrant(c.Param("token"))
+	if err != nil || grant.ProjectID != c.Param("id") || grant.ExpiresAt <= time.Now().Unix() {
+		fail(c, http.StatusForbidden, "INVALID_RESOURCE_GRANT", "HTML 资源凭证无效或已过期", "")
+		return
+	}
+	relative := strings.TrimPrefix(c.Param("assetPath"), "/")
+	cleanAsset, err := cleanAssetPath(relative)
+	if err != nil {
+		fail(c, http.StatusBadRequest, "INVALID_PATH", err.Error(), "")
+		return
+	}
+	exists, err := s.db.DocumentHasAsset(
+		c, grant.ProjectID, grant.BranchID, grant.DocumentPath, cleanAsset,
+	)
+	if err != nil {
+		internal(c, err)
+		return
+	}
+	if !exists {
+		fail(c, http.StatusForbidden, "ASSET_FORBIDDEN", "该资源不属于当前 HTML 文档", "")
+		return
+	}
+	project, err := s.db.Project(c, grant.ProjectID)
+	if err != nil {
+		respondRecord(c, nil, err)
+		return
+	}
+	user, _, err := s.db.UserBySession(c, grant.SessionID)
+	if err != nil {
+		respondRecord(c, nil, err)
+		return
+	}
+	if user.ID != grant.UserID {
+		fail(c, http.StatusForbidden, "INVALID_RESOURCE_GRANT", "HTML 资源凭证归属无效", "")
+		return
+	}
+	allowed := project.IsPublic || user.Role == "admin" || user.ID == project.OwnerID
+	access, err := s.db.ProjectReadAccess(c, project.ID, user.ID)
+	if err != nil {
+		internal(c, err)
+		return
+	}
+	if !allowed && access.Full {
+		allowed = true
+	}
+	branch, err := s.db.BranchName(c, project.ID, grant.BranchID)
+	if err != nil {
+		respondRecord(c, nil, err)
+		return
+	}
+	if !allowed {
+		allowed, err = s.db.CanReadDocumentAsset(
+			c, project.ID, branch, user.ID, cleanAsset,
+		)
+		if err != nil {
+			internal(c, err)
+			return
+		}
+	}
+	if !allowed {
+		fail(c, http.StatusForbidden, "ASSET_FORBIDDEN", "没有该资源的读取权限", "")
+		return
+	}
+	s.writeAsset(c, project.ID, branch, relative)
+}
+
+func (s *Server) serveAsset(c *gin.Context, branch, relative string) {
 	project, access, ok := s.requireProjectRead(c, c.Param("id"))
 	if !ok {
 		return
@@ -611,7 +732,11 @@ func (s *Server) asset(c *gin.Context) {
 			return
 		}
 	}
-	resolved, err := s.docs.ResolveAsset(c, project.ID, branch, relative)
+	s.writeAsset(c, project.ID, branch, relative)
+}
+
+func (s *Server) writeAsset(c *gin.Context, projectID, branch, relative string) {
+	resolved, err := s.docs.ResolveAsset(c, projectID, branch, relative)
 	if err != nil {
 		respondRecord(c, nil, err)
 		return
@@ -620,9 +745,70 @@ func (s *Server) asset(c *gin.Context) {
 	if contentType != "" {
 		c.Header("Content-Type", contentType)
 	}
+	if strings.EqualFold(filepath.Ext(resolved), ".html") ||
+		strings.EqualFold(filepath.Ext(resolved), ".htm") {
+		c.Header("Content-Security-Policy", htmlSandboxPolicy)
+		c.Header("X-Frame-Options", "SAMEORIGIN")
+		c.Header("Referrer-Policy", "no-referrer")
+	}
 	c.Header("Cache-Control", "private, max-age=300")
 	c.Header("X-Content-Type-Options", "nosniff")
 	c.File(resolved)
+}
+
+func (s *Server) htmlPreview(c *gin.Context) {
+	docPath := strings.TrimSpace(c.Query("path"))
+	if err := validateDocumentPath(docPath); err != nil {
+		fail(c, http.StatusBadRequest, "INVALID_PATH", err.Error(), "")
+		return
+	}
+	project, access, ok := s.requireProjectRead(c, c.Param("id"))
+	if !ok {
+		return
+	}
+	branch, ok := s.branchName(c, project.ID, c.Param("branchID"))
+	if !ok {
+		return
+	}
+	if _, allowed := access.documentSet[docPath]; !access.full && !allowed {
+		fail(c, http.StatusForbidden, "DOCUMENT_FORBIDDEN", "没有该文档的读取权限", "")
+		return
+	}
+	doc, err := s.db.Document(c, project.ID, branch, docPath)
+	if err != nil {
+		respondRecord(c, nil, err)
+		return
+	}
+	if doc.Format != store.DocumentFormatHTML {
+		fail(c, http.StatusBadRequest, "NOT_HTML_DOCUMENT", "该文档不是 HTML 格式", "")
+		return
+	}
+	resourceToken, err := s.createHTMLResourceGrant(htmlResourceGrant{
+		ProjectID:    project.ID,
+		BranchID:     c.Param("branchID"),
+		DocumentPath: doc.Path,
+		UserID:       currentUser(c).ID,
+		SessionID:    c.GetString(string(contextSID)),
+		ExpiresAt:    time.Now().Add(htmlResourceGrantTTL).Unix(),
+	})
+	if err != nil {
+		internal(c, err)
+		return
+	}
+	baseHref := sandboxAssetBase(project.ID, resourceToken, doc.Path)
+	prepared, err := docparse.PrepareHTML(doc.Source(), baseHref)
+	if err != nil {
+		internal(c, err)
+		return
+	}
+	c.Header("Content-Type", "text/html; charset=utf-8")
+	c.Header("Content-Disposition", "inline")
+	c.Header("Content-Security-Policy", htmlSandboxPolicy)
+	c.Header("X-Frame-Options", "SAMEORIGIN")
+	c.Header("Referrer-Policy", "no-referrer")
+	c.Header("Cache-Control", "private, no-store")
+	c.Header("X-Content-Type-Options", "nosniff")
+	c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(prepared))
 }
 
 func (s *Server) search(c *gin.Context) {
@@ -937,6 +1123,53 @@ func cleanAssetPath(value string) (string, error) {
 		return "", errors.New("资源路径无效")
 	}
 	return value, nil
+}
+
+func (s *Server) createHTMLResourceGrant(grant htmlResourceGrant) (string, error) {
+	payload, err := json.Marshal(grant)
+	if err != nil {
+		return "", err
+	}
+	return s.secrets.Encrypt(string(payload))
+}
+
+func (s *Server) parseHTMLResourceGrant(value string) (htmlResourceGrant, error) {
+	payload, err := s.secrets.Decrypt(value)
+	if err != nil {
+		return htmlResourceGrant{}, err
+	}
+	var grant htmlResourceGrant
+	if err := json.Unmarshal([]byte(payload), &grant); err != nil {
+		return htmlResourceGrant{}, err
+	}
+	if grant.ProjectID == "" || grant.BranchID == "" || grant.DocumentPath == "" ||
+		grant.UserID == "" || grant.SessionID == "" || grant.ExpiresAt == 0 {
+		return htmlResourceGrant{}, errors.New("资源凭证内容不完整")
+	}
+	return grant, nil
+}
+
+func (s *Server) branchName(c *gin.Context, projectID, branchID string) (string, bool) {
+	branch, err := s.db.BranchName(c, projectID, branchID)
+	if err != nil {
+		respondRecord(c, nil, err)
+		return "", false
+	}
+	return branch, true
+}
+
+func sandboxAssetBase(projectID, resourceToken, docPath string) string {
+	base := "/api/projects/" + url.PathEscape(projectID) +
+		"/sandbox-assets/" + url.PathEscape(resourceToken) + "/"
+	directory := path.Dir(docPath)
+	if directory == "." {
+		return base
+	}
+	parts := strings.Split(directory, "/")
+	for index, part := range parts {
+		parts[index] = url.PathEscape(part)
+	}
+	return base + strings.Join(parts, "/") + "/"
 }
 
 func accessError(c *gin.Context, err error) {

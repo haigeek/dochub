@@ -97,7 +97,7 @@ async function submit() {
     <section class="login-intro">
       <div class="intro-kicker">DOCS, IN CONTEXT.</div>
       <h1>让源码里的知识<br />被团队真正看见。</h1>
-      <p>连接代码仓库，直接浏览 Markdown 文档、目录结构和分支版本。内容跟着代码走，阅读始终清晰。</p>
+      <p>连接代码仓库，直接浏览 Markdown 与 HTML 文档、目录结构和分支版本。内容跟着代码走，阅读始终清晰。</p>
       <div class="feature-row">
         <span>SSH 仓库同步</span>
         <span>多分支快照</span>

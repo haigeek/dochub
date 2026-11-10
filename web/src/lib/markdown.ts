@@ -51,7 +51,7 @@ export function renderMarkdown(
     if (href && isRelativeURL(href)) {
       const [hrefWithoutAnchor, anchor] = href.split('#', 2)
       const target = resolveRelative(docPath, hrefWithoutAnchor)
-      if (isMarkdown(target)) {
+      if (isInternalDocument(target)) {
         tokens[index].attrSet('href', '#')
         tokens[index].attrSet('data-doc-path', target)
         if (anchor) tokens[index].attrSet('data-doc-anchor', anchor)
@@ -124,8 +124,9 @@ function isRelativeURL(value: string): boolean {
   return !/^(?:[a-z][a-z0-9+.-]*:|\/\/|#)/i.test(value)
 }
 
-function isMarkdown(value: string): boolean {
-  return /\.md(?:[?#].*)?$/i.test(value) || !/\.[a-z0-9]{1,8}(?:[?#].*)?$/i.test(value)
+function isInternalDocument(value: string): boolean {
+  return /\.(?:md|html?)(?:[?#].*)?$/i.test(value) ||
+    !/\.[a-z0-9]{1,8}(?:[?#].*)?$/i.test(value)
 }
 
 function resolveRelative(docPath: string, target: string): string {

@@ -156,6 +156,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 			id TEXT PRIMARY KEY,
 			slug TEXT,
 			name TEXT NOT NULL,
+			description TEXT NOT NULL DEFAULT '',
 			repo_url TEXT NOT NULL,
 			doc_root TEXT NOT NULL,
 			doc_roots JSONB NOT NULL DEFAULT '[]'::jsonb,
@@ -164,6 +165,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		)`,
 		`ALTER TABLE projects ADD COLUMN IF NOT EXISTS slug TEXT`,
+		`ALTER TABLE projects ADD COLUMN IF NOT EXISTS description TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE projects ADD COLUMN IF NOT EXISTS is_public BOOLEAN NOT NULL DEFAULT FALSE`,
 		`ALTER TABLE projects ADD COLUMN IF NOT EXISTS doc_roots JSONB`,
 		`UPDATE projects SET doc_roots = jsonb_build_array(doc_root)
@@ -186,10 +188,12 @@ func (s *Store) Migrate(ctx context.Context) error {
 			branch_id TEXT NOT NULL REFERENCES project_branches(id) ON DELETE CASCADE,
 			path TEXT NOT NULL,
 			title TEXT NOT NULL,
+			format TEXT NOT NULL DEFAULT 'markdown',
 			markdown TEXT NOT NULL,
 			plain_text TEXT NOT NULL,
 			PRIMARY KEY (branch_id, path)
 		)`,
+		`ALTER TABLE documents ADD COLUMN IF NOT EXISTS format TEXT NOT NULL DEFAULT 'markdown'`,
 		`CREATE INDEX IF NOT EXISTS documents_search_idx ON documents
 			USING GIN ((title || ' ' || path || ' ' || plain_text) gin_trgm_ops)`,
 		`CREATE TABLE IF NOT EXISTS project_read_permissions (
@@ -524,7 +528,7 @@ func (s *Store) UpdateUserRole(ctx context.Context, userID, role string) (User, 
 
 func (s *Store) ListProjects(ctx context.Context, userID string, includeAll bool) ([]Project, error) {
 	rows, err := s.DB.Query(ctx, `
-		SELECT p.id, p.slug, p.name, p.repo_url, p.doc_roots, p.owner_id, u.username,
+		SELECT p.id, p.slug, p.name, p.description, p.repo_url, p.doc_roots, p.owner_id, u.username,
 		       p.created_at, p.updated_at, p.is_public
 		FROM projects p JOIN users u ON u.id = p.owner_id
 		WHERE $2
@@ -560,7 +564,7 @@ func (s *Store) ListProjects(ctx context.Context, userID string, includeAll bool
 		var project Project
 		var docRootsRaw string
 		if err := rows.Scan(
-			&project.ID, &project.Slug, &project.Name, &project.RepoURL, &docRootsRaw,
+			&project.ID, &project.Slug, &project.Name, &project.Description, &project.RepoURL, &docRootsRaw,
 			&project.OwnerID, &project.OwnerName, &project.CreatedAt, &project.UpdatedAt,
 			&project.IsPublic,
 		); err != nil {
@@ -580,14 +584,14 @@ func (s *Store) Project(ctx context.Context, identifier string) (Project, error)
 	var project Project
 	var docRootsRaw string
 	err := s.DB.QueryRow(ctx, `
-		SELECT p.id, p.slug, p.name, p.repo_url, p.doc_roots, p.owner_id, u.username,
+		SELECT p.id, p.slug, p.name, p.description, p.repo_url, p.doc_roots, p.owner_id, u.username,
 		       p.created_at, p.updated_at, p.is_public
 		FROM projects p JOIN users u ON u.id = p.owner_id
 		WHERE p.id = $1 OR p.slug = $1
 		ORDER BY CASE WHEN p.id = $1 THEN 0 ELSE 1 END
 		LIMIT 1`, identifier,
 	).Scan(
-		&project.ID, &project.Slug, &project.Name, &project.RepoURL, &docRootsRaw,
+		&project.ID, &project.Slug, &project.Name, &project.Description, &project.RepoURL, &docRootsRaw,
 		&project.OwnerID, &project.OwnerName, &project.CreatedAt, &project.UpdatedAt,
 		&project.IsPublic,
 	)
@@ -604,7 +608,7 @@ func (s *Store) Project(ctx context.Context, identifier string) (Project, error)
 
 func (s *Store) CreateProject(
 	ctx context.Context,
-	name, repoURL string,
+	name, description, repoURL string,
 	docRoots []string,
 	ownerID string,
 	branches []string,
@@ -619,12 +623,13 @@ func (s *Store) CreateProject(
 		return Project{}, err
 	}
 	project := Project{
-		ID:       newID(),
-		Slug:     slug,
-		Name:     name,
-		RepoURL:  repoURL,
-		DocRoots: docRoots,
-		OwnerID:  ownerID,
+		ID:          newID(),
+		Slug:        slug,
+		Name:        name,
+		Description: description,
+		RepoURL:     repoURL,
+		DocRoots:    docRoots,
+		OwnerID:     ownerID,
 	}
 	tx, err := s.DB.Begin(ctx)
 	if err != nil {
@@ -639,9 +644,9 @@ func (s *Store) CreateProject(
 		return Project{}, ErrSlugExists
 	}
 	if _, err = tx.Exec(ctx,
-		`INSERT INTO projects (id, slug, name, repo_url, doc_root, doc_roots, owner_id, is_public)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-		project.ID, slug, name, repoURL, docRoots[0], encodedRoots, ownerID, isPublic,
+		`INSERT INTO projects (id, slug, name, description, repo_url, doc_root, doc_roots, owner_id, is_public)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+		project.ID, slug, name, description, repoURL, docRoots[0], encodedRoots, ownerID, isPublic,
 	); err != nil {
 		return Project{}, err
 	}
@@ -659,15 +664,21 @@ func (s *Store) CreateProject(
 	return s.Project(ctx, project.ID)
 }
 
-func (s *Store) UpdateProject(ctx context.Context, id, name, repoURL string, docRoots []string, isPublic bool) error {
+func (s *Store) UpdateProject(
+	ctx context.Context,
+	id, name, description, repoURL string,
+	docRoots []string,
+	isPublic bool,
+) error {
 	encodedRoots, err := encodeDocRoots(docRoots)
 	if err != nil {
 		return err
 	}
 	result, err := s.DB.Exec(ctx, `
 		UPDATE projects
-		SET name = $2, repo_url = $3, doc_root = $4, doc_roots = $5, is_public = $6, updated_at = NOW()
-		WHERE id = $1`, id, name, repoURL, docRoots[0], encodedRoots, isPublic)
+		SET name = $2, description = $3, repo_url = $4, doc_root = $5, doc_roots = $6,
+		    is_public = $7, updated_at = NOW()
+		WHERE id = $1`, id, name, description, repoURL, docRoots[0], encodedRoots, isPublic)
 	if err != nil {
 		return err
 	}
@@ -782,6 +793,18 @@ func (s *Store) BranchSnapshot(ctx context.Context, projectID, name string) (str
 	return snapshot, decodeDocRoots(docRootsRaw), err
 }
 
+func (s *Store) BranchName(ctx context.Context, projectID, branchID string) (string, error) {
+	var name string
+	err := s.DB.QueryRow(ctx, `
+		SELECT name FROM project_branches
+		WHERE project_id = $1 AND id = $2`, projectID, branchID,
+	).Scan(&name)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	return name, err
+}
+
 func (s *Store) MarkBranchRunning(ctx context.Context, projectID, branch string) error {
 	_, err := s.DB.Exec(ctx, `
 		UPDATE project_branches SET status = 'running', last_error = ''
@@ -808,10 +831,11 @@ func (s *Store) FinishBranchSync(ctx context.Context, projectID, branch, commit,
 		return err
 	}
 	for _, doc := range docs {
+		format := normalizeDocumentFormat(doc.Format)
 		if _, err = tx.Exec(ctx, `
-			INSERT INTO documents (branch_id, path, title, markdown, plain_text)
-			VALUES ($1, $2, $3, $4, $5)`,
-			branchID, doc.Path, doc.Title, doc.Markdown, doc.PlainText,
+			INSERT INTO documents (branch_id, path, title, format, markdown, plain_text)
+			VALUES ($1, $2, $3, $4, $5, $6)`,
+			branchID, doc.Path, doc.Title, format, doc.Source(), doc.PlainText,
 		); err != nil {
 			return err
 		}
@@ -846,7 +870,7 @@ func (s *Store) ListDocuments(
 	allowedPaths []string,
 ) ([]Document, error) {
 	rows, err := s.DB.Query(ctx, `
-		SELECT d.path, d.title
+		SELECT d.path, d.title, d.format
 		FROM documents d JOIN project_branches pb ON pb.id = d.branch_id
 		WHERE pb.project_id = $1 AND pb.name = $2
 		  AND ($3 OR d.path = ANY($4))
@@ -858,9 +882,10 @@ func (s *Store) ListDocuments(
 	var docs []Document
 	for rows.Next() {
 		var doc Document
-		if err := rows.Scan(&doc.Path, &doc.Title); err != nil {
+		if err := rows.Scan(&doc.Path, &doc.Title, &doc.Format); err != nil {
 			return nil, err
 		}
+		doc.Format = normalizeDocumentFormat(doc.Format)
 		docs = append(docs, doc)
 	}
 	return docs, rows.Err()
@@ -868,16 +893,26 @@ func (s *Store) ListDocuments(
 
 func (s *Store) Document(ctx context.Context, projectID, branch, docPath string) (DocFile, error) {
 	var doc DocFile
+	var source string
 	err := s.DB.QueryRow(ctx, `
-		SELECT d.path, d.title, d.markdown, d.plain_text
+		SELECT d.path, d.title, d.format, d.markdown, d.plain_text
 		FROM documents d JOIN project_branches pb ON pb.id = d.branch_id
 		WHERE pb.project_id = $1 AND pb.name = $2 AND d.path = $3`,
 		projectID, branch, docPath,
-	).Scan(&doc.Path, &doc.Title, &doc.Markdown, &doc.PlainText)
+	).Scan(&doc.Path, &doc.Title, &doc.Format, &source, &doc.PlainText)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return DocFile{}, ErrNotFound
 	}
-	return doc, err
+	if err != nil {
+		return DocFile{}, err
+	}
+	doc.Format = normalizeDocumentFormat(doc.Format)
+	if doc.Format == DocumentFormatHTML {
+		doc.HTML = source
+	} else {
+		doc.Markdown = source
+	}
+	return doc, nil
 }
 
 func (s *Store) SearchDocuments(

@@ -27,6 +27,7 @@ const loading = ref(false)
 const error = ref('')
 const form = reactive({
   name: '',
+  description: '',
   repoUrl: '',
   docRoots: ['docs'],
   branches: ['main'],
@@ -39,6 +40,7 @@ watch(
     if (!show) return
     error.value = ''
     form.name = ''
+    form.description = ''
     form.repoUrl = ''
     form.docRoots = ['docs']
     form.branches = ['main']
@@ -58,6 +60,7 @@ async function submit() {
       method: 'POST',
       body: JSON.stringify({
         name: form.name.trim(),
+        description: form.description.trim(),
         repoUrl: form.repoUrl.trim(),
         docRoots: form.docRoots.map((value) => value.trim()).filter(Boolean),
         branches: form.branches,
@@ -93,6 +96,16 @@ async function submit() {
       <NForm label-placement="top" @submit.prevent="submit">
         <NFormItem label="项目名称" required>
           <NInput v-model:value="form.name" placeholder="例如：服务端研发手册" />
+        </NFormItem>
+        <NFormItem label="项目描述">
+          <NInput
+            v-model:value="form.description"
+            type="textarea"
+            :maxlength="500"
+            show-count
+            :autosize="{ minRows: 2, maxRows: 4 }"
+            placeholder="简要说明项目用途，例如：规则引擎服务端接口与接入文档"
+          />
         </NFormItem>
         <NFormItem label="可见范围">
           <NSpace align="center">

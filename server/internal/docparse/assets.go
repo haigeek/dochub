@@ -14,10 +14,15 @@ var (
 	referenceAssetPattern = regexp.MustCompile(
 		`(?m)^\s{0,3}\[[^\]]+\]:\s*(?:<([^>]+)>|(\S+))`,
 	)
+	cssURLPattern    = regexp.MustCompile(`(?i)url\(\s*(?:["']([^"']+)["']|([^'")\s]+))\s*\)`)
+	cssImportPattern = regexp.MustCompile(`(?i)@import\s+["']([^"']+)["']`)
 )
 
 // ExtractAssets 返回 Markdown 中引用的仓库内相对非 Markdown 资源路径。
 func ExtractAssets(markdown, docPath string) []string {
+	if isHTMLPath(docPath) {
+		return ParseHTML(markdown, docPath).Assets
+	}
 	seen := make(map[string]struct{})
 	var assets []string
 	collect := func(candidate string) {
@@ -45,6 +50,34 @@ func ExtractAssets(markdown, docPath string) []string {
 		} else {
 			collect(match[2])
 		}
+	}
+	return assets
+}
+
+// ExtractCSSAssets 返回 CSS 中通过 url() 或 @import 引用的仓库内资源。
+func ExtractCSSAssets(source, cssPath string) []string {
+	seen := make(map[string]struct{})
+	var assets []string
+	collect := func(candidate string) {
+		assetPath, ok := normalizeAssetPath(cssPath, candidate)
+		if !ok {
+			return
+		}
+		if _, exists := seen[assetPath]; exists {
+			return
+		}
+		seen[assetPath] = struct{}{}
+		assets = append(assets, assetPath)
+	}
+	for _, match := range cssURLPattern.FindAllStringSubmatch(source, -1) {
+		if match[1] != "" {
+			collect(match[1])
+		} else {
+			collect(match[2])
+		}
+	}
+	for _, match := range cssImportPattern.FindAllStringSubmatch(source, -1) {
+		collect(match[1])
 	}
 	return assets
 }

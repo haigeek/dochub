@@ -62,6 +62,7 @@ export interface Project {
   id: string
   slug: string
   name: string
+  description: string
   repoUrl: string
   docRoots: string[]
   ownerId: string
@@ -74,6 +75,7 @@ export interface Project {
 export interface DocumentItem {
   path: string
   title: string
+  format: 'markdown' | 'html'
 }
 
 export interface SidebarTreeNode {
@@ -84,7 +86,8 @@ export interface SidebarTreeNode {
 }
 
 export interface DocumentContent extends DocumentItem {
-  markdown: string
+  markdown?: string
+  html?: string
   plainText?: string
 }
 

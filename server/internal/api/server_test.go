@@ -5,7 +5,9 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
+	"dochub/internal/config"
 	"dochub/internal/store"
 )
 
@@ -33,17 +35,49 @@ func TestSafeAttachmentFilename(t *testing.T) {
 }
 
 func TestDocumentJSONFields(t *testing.T) {
-	payload, err := json.Marshal(store.DocFile{Path: "README.md", Markdown: "# 标题"})
+	payload, err := json.Marshal(store.DocFile{
+		Path: "README.html", Format: store.DocumentFormatHTML, HTML: "<h1>标题</h1>",
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, field := range []string{`"path"`, `"markdown"`} {
+	for _, field := range []string{`"path"`, `"format":"html"`, `"html"`} {
 		if !strings.Contains(string(payload), field) {
 			t.Fatalf("文档 JSON 缺少字段 %s: %s", field, payload)
 		}
 	}
-	if strings.Contains(string(payload), `"Markdown"`) {
-		t.Fatalf("文档 JSON 不应输出大写字段: %s", payload)
+	if strings.Contains(string(payload), `"markdown"`) {
+		t.Fatalf("HTML 文档 JSON 不应输出空 markdown: %s", payload)
+	}
+}
+
+func TestSandboxAssetBase(t *testing.T) {
+	got := sandboxAssetBase("project 1", "v1:token/1", "docs/使用说明/index.html")
+	want := "/api/projects/project%201/sandbox-assets/v1:token%2F1/docs/%E4%BD%BF%E7%94%A8%E8%AF%B4%E6%98%8E/"
+	if got != want {
+		t.Fatalf("HTML 资源基址错误: got %q want %q", got, want)
+	}
+}
+
+func TestHTMLResourceGrant(t *testing.T) {
+	server := New(config.Config{StorageDir: t.TempDir()}, nil, nil)
+	want := htmlResourceGrant{
+		ProjectID: "project", BranchID: "branch", DocumentPath: "docs/index.html",
+		UserID: "user", SessionID: "session", ExpiresAt: time.Now().Add(time.Minute).Unix(),
+	}
+	token, err := server.createHTMLResourceGrant(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := server.parseHTMLResourceGrant(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatalf("HTML 资源凭证解析错误: got %#v want %#v", got, want)
+	}
+	if _, err := server.parseHTMLResourceGrant(token + "tampered"); err == nil {
+		t.Fatal("被篡改的 HTML 资源凭证不应通过校验")
 	}
 }
 

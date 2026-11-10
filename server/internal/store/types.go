@@ -2,6 +2,11 @@ package store
 
 import "time"
 
+const (
+	DocumentFormatMarkdown = "markdown"
+	DocumentFormatHTML     = "html"
+)
+
 type User struct {
 	ID          string    `json:"id"`
 	Username    string    `json:"username"`
@@ -47,17 +52,18 @@ type ReadAccess struct {
 }
 
 type Project struct {
-	IsPublic  bool      `json:"isPublic"`
-	ID        string    `json:"id"`
-	Slug      string    `json:"slug"`
-	Name      string    `json:"name"`
-	RepoURL   string    `json:"repoUrl"`
-	DocRoots  []string  `json:"docRoots"`
-	OwnerID   string    `json:"ownerId"`
-	OwnerName string    `json:"ownerName"`
-	CreatedAt time.Time `json:"createdAt"`
-	UpdatedAt time.Time `json:"updatedAt"`
-	Branches  []Branch  `json:"branches"`
+	IsPublic    bool      `json:"isPublic"`
+	ID          string    `json:"id"`
+	Slug        string    `json:"slug"`
+	Name        string    `json:"name"`
+	Description string    `json:"description"`
+	RepoURL     string    `json:"repoUrl"`
+	DocRoots    []string  `json:"docRoots"`
+	OwnerID     string    `json:"ownerId"`
+	OwnerName   string    `json:"ownerName"`
+	CreatedAt   time.Time `json:"createdAt"`
+	UpdatedAt   time.Time `json:"updatedAt"`
+	Branches    []Branch  `json:"branches"`
 }
 
 type Branch struct {
@@ -71,8 +77,9 @@ type Branch struct {
 }
 
 type Document struct {
-	Path  string `json:"path"`
-	Title string `json:"title"`
+	Path   string `json:"path"`
+	Title  string `json:"title"`
+	Format string `json:"format"`
 }
 
 type SearchResult struct {
@@ -94,7 +101,23 @@ type SyncJob struct {
 type DocFile struct {
 	Path      string   `json:"path"`
 	Title     string   `json:"title"`
-	Markdown  string   `json:"markdown"`
+	Format    string   `json:"format"`
+	Markdown  string   `json:"markdown,omitempty"`
+	HTML      string   `json:"html,omitempty"`
 	PlainText string   `json:"plainText"`
 	Assets    []string `json:"assets,omitempty"`
+}
+
+func (d DocFile) Source() string {
+	if normalizeDocumentFormat(d.Format) == DocumentFormatHTML {
+		return d.HTML
+	}
+	return d.Markdown
+}
+
+func normalizeDocumentFormat(format string) string {
+	if format == DocumentFormatHTML {
+		return DocumentFormatHTML
+	}
+	return DocumentFormatMarkdown
 }

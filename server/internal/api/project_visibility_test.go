@@ -31,7 +31,7 @@ func TestProjectVisibility(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	project, err := db.CreateProject(ctx, "Visibility", "git@git.test:team/visibility.git",
+	project, err := db.CreateProject(ctx, "Visibility", "项目可见范围测试", "git@git.test:team/visibility.git",
 		[]string{"docs"}, owner.ID, []string{"main"}, false)
 	if err != nil {
 		t.Fatal(err)
@@ -52,8 +52,20 @@ func TestProjectVisibility(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(snapshot, "docs", "asset.txt"), []byte("asset"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.MkdirAll(filepath.Join(snapshot, "docs", "assets"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(snapshot, "docs", "assets", "guide.css"), []byte("body { color: #222; }"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if err := db.FinishBranchSync(ctx, project.ID, "main", "commit", snapshot, []store.DocFile{
 		{Path: "docs/readme.md", Title: "Guide", Markdown: "# Guide\n[asset](asset.txt)", PlainText: "Guide"},
+		{
+			Path: "docs/html-guide.html", Title: "HTML Guide", Format: store.DocumentFormatHTML,
+			HTML:      `<!doctype html><html><head><title>HTML Guide</title><base href="https://evil.example/"><meta http-equiv="refresh" content="0;url=https://evil.example"><link rel="stylesheet" href="assets/guide.css"></head><body><h1>HTML Guide</h1></body></html>`,
+			PlainText: "HTML Guide",
+			Assets:    []string{"docs/assets/guide.css"},
+		},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -61,9 +73,11 @@ func TestProjectVisibility(t *testing.T) {
 	ownerCookie, ownerCSRF := loginForTest(t, router, "owner", "visibility-test-password")
 	memberCookie, memberCSRF := loginForTest(t, router, "reader", "visibility-test-password")
 	base := "/api/projects/" + project.ID
+	htmlPreviewPath := base + "/html-preview/" + project.Branches[0].ID +
+		"?path=docs%2Fhtml-guide.html"
 	readPaths := []string{base, base + "/tree?branch=main", base + "/doc?branch=main&path=docs/readme.md",
 		base + "/doc/download?branch=main&path=docs/readme.md", base + "/search?branch=main&q=Guide",
-		base + "/assets/docs/asset.txt?branch=main"}
+		base + "/assets/docs/asset.txt?branch=main", htmlPreviewPath}
 	request := func(method, path string, body []byte, cookie *http.Cookie, csrf string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(method, path, bytes.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
@@ -98,6 +112,29 @@ func TestProjectVisibility(t *testing.T) {
 	setVisibility(true, memberCookie, memberCSRF, http.StatusForbidden)
 	setVisibility(true, ownerCookie, ownerCSRF, http.StatusOK)
 	assertRead(http.StatusOK)
+	preview := request(http.MethodGet, htmlPreviewPath, nil, memberCookie, "")
+	if preview.Code != http.StatusOK ||
+		preview.Header().Get("X-Frame-Options") != "SAMEORIGIN" ||
+		!strings.Contains(preview.Header().Get("Content-Security-Policy"), "sandbox allow-scripts") ||
+		!strings.Contains(preview.Body.String(), `href="/api/projects/`+project.ID+`/sandbox-assets/`) ||
+		strings.Contains(strings.ToLower(preview.Body.String()), "evil.example") {
+		t.Fatalf("HTML 沙箱预览错误: %d %s", preview.Code, preview.Body.String())
+	}
+	body := preview.Body.String()
+	baseMarker := strings.Index(body, `href="`)
+	if baseMarker < 0 {
+		t.Fatalf("HTML 预览缺少资源基址: %s", body)
+	}
+	baseStart := baseMarker + len(`href="`)
+	baseEnd := strings.Index(body[baseStart:], `"`)
+	if baseEnd < 0 {
+		t.Fatalf("HTML 预览缺少资源基址: %s", body)
+	}
+	sandboxAssetPath := body[baseStart:baseStart+baseEnd] + "assets/guide.css"
+	if response := request(http.MethodGet, sandboxAssetPath, nil, nil, ""); response.Code != http.StatusOK ||
+		!strings.Contains(response.Header().Get("Content-Type"), "text/css") {
+		t.Fatalf("沙箱资源凭证应允许无 Cookie 访问: %d %s", response.Code, response.Body.String())
+	}
 	setVisibility(nil, ownerCookie, ownerCSRF, http.StatusOK)
 	assertRead(http.StatusOK)
 	list := request(http.MethodGet, "/api/projects", nil, memberCookie, "")
@@ -127,11 +164,28 @@ func TestProjectVisibility(t *testing.T) {
 	if err := db.SetProjectReadAccess(ctx, project.ID, []string{member.ID}, nil, owner.ID); err != nil {
 		t.Fatal(err)
 	}
+	if response := request(http.MethodGet, htmlPreviewPath, nil, memberCookie, ""); response.Code != http.StatusOK {
+		t.Fatalf("文档权限应允许访问 HTML 预览: %d %s", response.Code, response.Body.String())
+	}
+	if response := request(http.MethodGet, sandboxAssetPath, nil, nil, ""); response.Code != http.StatusOK ||
+		!strings.Contains(response.Header().Get("Content-Type"), "text/css") {
+		t.Fatalf("文档权限应允许访问 HTML 资源: %d %s", response.Code, response.Body.String())
+	}
+	if err := db.SetProjectReadAccess(ctx, project.ID, nil, nil, owner.ID); err != nil {
+		t.Fatal(err)
+	}
+	if response := request(http.MethodGet, sandboxAssetPath, nil, nil, ""); response.Code != http.StatusForbidden {
+		t.Fatalf("撤销文档权限后资源凭证应失效: %d %s", response.Code, response.Body.String())
+	}
+	if err := db.SetProjectReadAccess(ctx, project.ID, []string{member.ID}, nil, owner.ID); err != nil {
+		t.Fatal(err)
+	}
 	setVisibility(true, ownerCookie, ownerCSRF, http.StatusOK)
 	setVisibility(false, ownerCookie, ownerCSRF, http.StatusOK)
 	assertRead(http.StatusOK)
 	updated, err := db.Project(ctx, project.ID)
-	if err != nil || updated.IsPublic || updated.Branches[0].CommitSHA != "commit" {
+	if err != nil || updated.IsPublic || updated.Branches[0].CommitSHA != "commit" ||
+		updated.Description != "项目可见范围测试" {
 		t.Fatalf("切换可见范围应保留快照: %#v %v", updated, err)
 	}
 	for _, isPublic := range []bool{false, true} {
@@ -140,7 +194,8 @@ func TestProjectVisibility(t *testing.T) {
 			name = "public-created"
 		}
 		input := map[string]any{
-			"name": name, "repoUrl": "git@git.test:team/" + name + ".git",
+			"name": name, "description": name + " description",
+			"repoUrl":  "git@git.test:team/" + name + ".git",
 			"docRoots": []string{"docs"}, "branches": []string{"main"},
 		}
 		if isPublic {
@@ -152,7 +207,8 @@ func TestProjectVisibility(t *testing.T) {
 			Data store.Project `json:"data"`
 		}
 		if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil ||
-			response.Code != http.StatusCreated || result.Data.IsPublic != isPublic {
+			response.Code != http.StatusCreated || result.Data.IsPublic != isPublic ||
+			result.Data.Description != name+" description" {
 			t.Fatalf("创建项目公开性错误: %d %s", response.Code, response.Body.String())
 		}
 	}
