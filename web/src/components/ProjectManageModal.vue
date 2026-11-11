@@ -299,6 +299,7 @@ async function saveProjectAccess() {
                 </NTag>
                 <NPopconfirm
                   v-if="props.project.branches.length > 1"
+                  to="body"
                   positive-text="移除"
                   negative-text="取消"
                   @positive-click="removeBranch(branch.name)"
@@ -332,6 +333,7 @@ async function saveProjectAccess() {
             <p>删除项目数据、本地镜像和所有文档快照。远端仓库不受影响。</p>
           </div>
           <NPopconfirm
+            to="body"
             positive-text="永久删除"
             negative-text="取消"
             type="warning"
